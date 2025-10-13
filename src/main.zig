@@ -1,10 +1,11 @@
 const std = @import("std");
 
-//TODO: handle_sigint
-// fn handle_sigint(_: c_int) callconv(.C) void {
-//     // Just mark that Ctrl+C was pressed
-//     std.atomic.Atomic(bool).init(false).store(true, .SeqCst);
-// }
+// Default log level set to info
+pub const std_options: std.Options = .{
+    // Set the log level to info
+    .log_level = .info,
+};
+
 fn switchServer(
     timer: *std.time.Timer,
     servers: []std.net.Address,
@@ -13,10 +14,10 @@ fn switchServer(
 ) !void {
     while (true) {
         const elapsed = std.time.Timer.read(timer);
-        const duration: u64 = std.time.ns_per_s * 15;
-        std.log.debug("Time elapsed: {d}\n", .{elapsed});
-        std.log.debug("Time duration: {d}\n", .{duration});
-        std.log.debug("Time packet_arrived: {}\n", .{packet_arrived.*});
+        const duration: u64 = std.time.ns_per_s * 19;
+        std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
+        std.log.debug("Timer time duration: {d}\n", .{duration});
+        std.log.debug("Timer packet_arrived state: {}\n", .{packet_arrived.*});
 
         // Main check is if packet has arrived
         if (!packet_arrived.*) {
@@ -34,7 +35,7 @@ fn switchServer(
         }
         // Reset timer to sync threads
         std.time.Timer.reset(timer);
-        std.Thread.sleep(std.time.ns_per_s * 15);
+        std.Thread.sleep(std.time.ns_per_s * 19);
     }
 }
 fn wgToServer(
@@ -96,6 +97,7 @@ fn serverToWg(
     other_addrlen: *std.posix.socklen_t,
     wg_addr: std.net.Address,
 ) !void {
+    // Assign correct memory alignment so initPosix can work with it
     const tmp_addr: *align(4) std.posix.sockaddr = @alignCast(other_addr);
 
     while (true) {
@@ -108,14 +110,14 @@ fn serverToWg(
             other_addr,
             other_addrlen,
         )) |recv| {
+            //  Converts other_addr to a correct struct that can be pretty formatted with {f}
             const addr = std.net.Address.initPosix(tmp_addr);
             tmp_addr.* = other_addr.*;
             std.log.debug("Received {d} bytes, server: {f}\n", .{ recv, addr });
             const packet = srv_buf[0..recv];
             const server = servers[current_id.*];
-            std.log.debug("Correct server: {f}\n", .{server});
             if (!std.net.Address.eql(addr, server)) {
-                std.log.warn("Wrong server responding, it should be: {f}\n", .{server});
+                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}\n", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, set the correct state
                 packet_arrived.* = false;
                 continue;
@@ -141,15 +143,7 @@ fn serverToWg(
     }
 }
 pub fn main() !void {
-    // Define memory allocator and handle sig-INT
     const allocator = std.heap.smp_allocator;
-    //TODO: Handle sig-INT
-    // const sig = std.posix.SIG;
-    // try std.posix.sigaction(sig.INT, &std.posix.Sigaction{
-    //     .handler = .{ .handler = handle_sigint },
-    //     .mask = std.posix.empty_sigset,
-    //     .flags = 0,
-    // }, null);
 
     var other_addr: std.posix.sockaddr = undefined;
     var other_addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
@@ -210,13 +204,13 @@ pub fn main() !void {
         servers[i] = try std.net.Address.parseIp4(ip, port);
     }
     // Set default server ID
-    var current_id: usize = 1;
+    var current_id: usize = 0;
 
     // Buffers for holding packets. buf -> cleint; srv_buf -> server;
     var buf: [9000]u8 = undefined;
     var srv_buf: [9000]u8 = undefined;
 
-    // Timer for swithing logic and syncing threads. If time exceeds 20 sec, switch servers.
+    // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch servers.
     // Block switcihing on every packet sent from server to client
     var timer = try std.time.Timer.start();
     var packet_arrived = true;
