@@ -5,7 +5,9 @@ WireGuard helper for seamless endpoint host switching
 
 ## WIP
 Change configuration file to yaml at some point (implement yaml parsing).
-Copy default config template and serice file on installation step. 
+
+Copy default config template and service file on installation step. 
+
 Fix a posible memory leak in readFile function. Needs refactor of parser.zig or changing an allocator.
 
 ---
