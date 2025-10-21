@@ -1,45 +1,70 @@
 const std = @import("std");
+const cfg = @import("parser.zig");
 
-// Default log level set to info
+// Comptime logging level set to debug
 pub const std_options: std.Options = .{
-    // Set the log level to info
-    .log_level = .info,
+    .logFn = logFn,
+    .log_level = .debug,
 };
 
+var log_level = std.log.default_level;
+
+// Function to set up runtime logging level
+fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (@intFromEnum(message_level) <= @intFromEnum(log_level)) {
+        std.log.defaultLog(message_level, scope, format, args);
+    }
+}
+
 fn switchServer(
-    timer: *std.time.Timer,
+    time: ?usize,
+    timer: *?std.time.Timer,
     servers: []std.net.Address,
     current_id: *usize,
     packet_arrived: *bool,
 ) !void {
-    while (true) {
-        const elapsed = std.time.Timer.read(timer);
-        const duration: u64 = std.time.ns_per_s * 19;
-        std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
-        std.log.debug("Timer time duration: {d}\n", .{duration});
-        std.log.debug("Timer packet_arrived state: {}\n", .{packet_arrived.*});
+    // Unwrap timer and time optionals
+    if (timer.*) |*t| if (time) |seconds| {
+        while (true) {
+            const elapsed = std.time.Timer.read(t);
+            const duration: u64 = std.time.ns_per_s * seconds;
+            std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
+            std.log.debug("Timer time duration: {d}\n", .{duration});
+            std.log.debug("Timer packet_arrived state: {}\n", .{packet_arrived.*});
 
-        // Main check is if packet has arrived
-        if (!packet_arrived.*) {
-            // Second check is if enough time has passsed before switching
-            if (elapsed < duration) {
-                std.Thread.sleep(duration - elapsed);
-                continue;
+            // Main check is if packet has arrived
+            if (!packet_arrived.*) {
+                // Second check is if enough time has passsed before switching
+                if (elapsed < duration) {
+                    std.Thread.sleep(duration - elapsed);
+                    continue;
+                }
+                const new_id = (current_id.* + 1) % servers.len;
+                current_id.* = new_id;
+                std.log.info("Switched servers endpoints!\n", .{});
+                std.log.info("Current endpoint: {f}\n", .{&servers[current_id.*]});
+                // Reset packet state
+                packet_arrived.* = true;
             }
-            const new_id = (current_id.* + 1) % servers.len;
-            current_id.* = new_id;
-            std.log.info("Switched servers endpoints!\n", .{});
-            std.log.info("Current endpoint: {f}\n", .{&servers[current_id.*]});
-            // Reset packet state
-            packet_arrived.* = true;
+            // Reset timer to sync threads
+            std.time.Timer.reset(t);
+            std.Thread.sleep(std.time.ns_per_s * seconds);
         }
-        // Reset timer to sync threads
-        std.time.Timer.reset(timer);
-        std.Thread.sleep(std.time.ns_per_s * 19);
+    } else {
+        std.log.err("time variable failed to unwrap: {any}\n", .{time});
+        return;
+    } else {
+        std.log.err("switchServer got called but timer variable did not unwrap: {any}\n", .{timer});
+        return;
     }
 }
 fn wgToServer(
-    timer: *std.time.Timer,
+    timer: *?std.time.Timer,
     packet_arrived: *bool,
     wg_sock: c_int,
     serv_sock: c_int,
@@ -69,12 +94,12 @@ fn wgToServer(
                 &servers[current_id.*].any,
                 servers[current_id.*].getOsSockLen(),
             )) |_| {
-                //Reset packet_arrived flag
-                if (packet_arrived.*) {
-                    // Reset timer to sync threads
-                    std.time.Timer.reset(timer);
+                // Unwrap timer optional
+                if (timer.*) |*t| if (packet_arrived.*) {
+                    // Reset timer to sync threads and set packet_arrived state
+                    std.time.Timer.reset(t);
                     packet_arrived.* = false;
-                }
+                };
             } else |err| {
                 std.log.err(
                     "Backend {f} failed: {any}\n",
@@ -129,7 +154,7 @@ fn serverToWg(
                 &wg_addr.any,
                 wg_addr.getOsSockLen(),
             )) |_| {
-                // Confirm packet came from server
+                // Confirm packet came from the server
                 packet_arrived.* = true;
             } else |err| {
                 std.log.err(
@@ -144,7 +169,24 @@ fn serverToWg(
 }
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
+    if (args.len != 3) {
+        std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
+        return error.InvalidArgs;
+    }
+    const path = args[2];
+    var config = try cfg.readFile(allocator, path);
+
+    if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
+        log_level = level;
+    } else {
+        std.log.err("Unknown log level:{s}\n", .{lvl});
+        std.process.exit(1);
+    } else {
+        std.log.info("Using default log level: {s}\n", .{@tagName(log_level)});
+    }
     var other_addr: std.posix.sockaddr = undefined;
     var other_addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
 
@@ -165,11 +207,15 @@ pub fn main() !void {
     defer std.posix.close(serv_sock);
 
     // WireGuard -> Proxy
-    const wg_listen_port: u16 = 51821;
-    const wg_listen_addr = try std.net.Address.parseIp4("127.0.0.1", wg_listen_port);
+    const wg_listen_addr = try std.net.Address.parseIp4(
+        config.client_socket.address,
+        config.client_socket.port,
+    );
     // Proxy
-    const proxy_listen_port: u16 = 61821;
-    const proxy_listen_addr = try std.net.Address.parseIp4("127.0.0.1", proxy_listen_port);
+    const proxy_listen_addr = try std.net.Address.parseIp4(
+        config.forwarder_socket.address,
+        config.forwarder_socket.port,
+    );
     try std.posix.bind(
         wg_sock,
         &proxy_listen_addr.any,
@@ -177,22 +223,20 @@ pub fn main() !void {
     );
 
     // Proxy -> Server
-    const server_listen_port: u16 = 8921;
-    const server_listen_addr = try std.net.Address.parseIp4("0.0.0.0", server_listen_port);
+    const server_listen_addr = try std.net.Address.parseIp4(
+        config.server_socket.address,
+        config.server_socket.port,
+    );
     try std.posix.bind(
         serv_sock,
         &server_listen_addr.any,
         server_listen_addr.getOsSockLen(),
     );
-    //TODO: Make it file readable
-    const server_endpoints = [_][]const u8{
-        "192.168.1.4:8921",
-        "100.116.14.17:8921",
-    };
 
     // Format read endpoints
-    var servers: [server_endpoints.len]std.net.Address = undefined;
-    for (server_endpoints, 0..) |s, i| {
+    var servers = try allocator.alloc(std.net.Address, config.switcher.endpoints.len);
+    defer allocator.free(servers);
+    for (config.switcher.endpoints, 0..) |s, i| {
         var split: std.ArrayList([]const u8) = .empty;
         defer split.deinit(allocator);
         var iter = std.mem.splitScalar(u8, s, ':');
@@ -204,7 +248,7 @@ pub fn main() !void {
         servers[i] = try std.net.Address.parseIp4(ip, port);
     }
     // Set default server ID
-    var current_id: usize = 0;
+    var current_id: usize = config.switcher.id;
 
     // Buffers for holding packets. buf -> cleint; srv_buf -> server;
     var buf: [9000]u8 = undefined;
@@ -212,15 +256,24 @@ pub fn main() !void {
 
     // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch servers.
     // Block switcihing on every packet sent from server to client
-    var timer = try std.time.Timer.start();
+    var timer: ?std.time.Timer = null;
+    const time: ?usize = config.switcher.timer;
+    var switcher_thread: ?std.Thread = null;
     var packet_arrived = true;
-    std.log.info("Spawning timer_thread....\n", .{});
-    const timer_thread = try std.Thread.spawn(.{}, switchServer, .{
-        &timer,
-        &servers,
-        &current_id,
-        &packet_arrived,
-    });
+    // Comply with the switcher flag
+    if (config.switcher.enabled) {
+        std.log.info("Spawning switcher thread....\n", .{});
+        timer = try std.time.Timer.start();
+        switcher_thread = try std.Thread.spawn(.{}, switchServer, .{
+            time,
+            &timer,
+            servers,
+            &current_id,
+            &packet_arrived,
+        });
+    } else {
+        std.log.info("Switching disabled, using endpoint derived form ID....\n", .{});
+    }
     std.log.info("Spawning client listener....\n", .{});
     const client_thread = try std.Thread.spawn(.{}, wgToServer, .{
         &timer,
@@ -230,23 +283,26 @@ pub fn main() !void {
         &buf,
         &other_addr,
         &other_addrlen,
-        &servers,
+        servers,
         &current_id,
     });
+
     std.log.info("Spawning server listener....\n", .{});
     const server_thread = try std.Thread.spawn(.{}, serverToWg, .{
         &packet_arrived,
         wg_sock,
         serv_sock,
         &srv_buf,
-        &servers,
+        servers,
         &current_id,
         &other_addr,
         &other_addrlen,
         wg_listen_addr,
     });
 
-    timer_thread.join();
+    if (switcher_thread) |thread| {
+        thread.join();
+    }
     client_thread.join();
     server_thread.join();
 }
