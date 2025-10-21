@@ -19,7 +19,8 @@ Fix a posible memory leak in readFile function. Needs refactor of parser.zig or 
 ---
 
 ## Configuration
-Currently supports json formatting. Example:
+Currently supports json formatting.  client_socket should be named client_endpoint - WIP
+Example:
 ```
 {
   "client_socket": {
