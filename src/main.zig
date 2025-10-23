@@ -28,7 +28,7 @@ fn switcher(
     current_id: *usize,
     packet_arrived: *bool,
 ) !void {
-    // Unwrap timer and time optionals
+    // Unwrap timer  optional
     if (timer.*) |*t| {
         while (true) {
             const elapsed = std.time.Timer.read(t);
