@@ -21,15 +21,15 @@ fn logFn(
     }
 }
 
-fn switchServer(
-    time: ?usize,
+fn switcher(
+    seconds: usize,
     timer: *?std.time.Timer,
     servers: []std.net.Address,
     current_id: *usize,
     packet_arrived: *bool,
 ) !void {
     // Unwrap timer and time optionals
-    if (timer.*) |*t| if (time) |seconds| {
+    if (timer.*) |*t| {
         while (true) {
             const elapsed = std.time.Timer.read(t);
             const duration: u64 = std.time.ns_per_s * seconds;
@@ -56,11 +56,8 @@ fn switchServer(
             std.Thread.sleep(std.time.ns_per_s * seconds);
         }
     } else {
-        std.log.err("time variable failed to unwrap: {any}\n", .{time});
-        return;
-    } else {
-        std.log.err("switchServer got called but timer variable did not unwrap: {any}\n", .{timer});
-        return;
+        std.log.err("Switcher got called but timer variable did not unwrap: {any}\n", .{timer});
+        std.posix.exit(1);
     }
 }
 fn wgToServer(
@@ -263,16 +260,19 @@ pub fn main() !void {
     var switcher_thread: ?std.Thread = null;
     var packet_arrived = true;
     // Comply with the switcher flag
-    if (config.switcher.enabled) {
+    if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....\n", .{});
         timer = try std.time.Timer.start();
-        switcher_thread = try std.Thread.spawn(.{}, switchServer, .{
-            time,
+        switcher_thread = try std.Thread.spawn(.{}, switcher, .{
+            seconds,
             &timer,
             servers,
             &current_id,
             &packet_arrived,
         });
+    } else {
+        std.log.err("Switcher enabled but timer interval failed to unwrap: {any}\n", .{time});
+        std.posix.exit(1);
     } else {
         std.log.info("Switching disabled, using endpoint derived form ID....\n", .{});
     }
