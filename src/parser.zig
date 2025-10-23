@@ -1,7 +1,12 @@
 const std = @import("std");
 
+const Reader = struct {
+    config: Config,
+    buf: []u8,
+};
+
 const Config = struct {
-    client_socket: Socket,
+    client_endpoint: Socket,
     forwarder_socket: Socket,
     server_socket: Socket,
     switcher: Switcher,
@@ -20,7 +25,7 @@ const Config = struct {
     };
 };
 
-pub fn readFile(allocator: std.mem.Allocator, path: []const u8) !Config {
+pub fn readFile(allocator: std.mem.Allocator, path: []const u8) !Reader {
     const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
     const stat = try file.stat();
     const size = stat.size;
@@ -36,5 +41,5 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8) !Config {
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
-    return parsed.value;
+    return Reader{ .config = parsed.value, .buf = buf };
 }

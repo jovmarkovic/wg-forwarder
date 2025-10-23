@@ -8,22 +8,21 @@ Change configuration file to yaml at some point (implement yaml parsing).
 
 Copy default config template and service file on installation step. 
 
-Fix a posible memory leak in readFile function. Needs refactor of parser.zig or changing an allocator.
-
 ---
 ## Usage/Flags
 ```
 -c <config_path>
 ```
-
 ---
 
 ## Configuration
-Currently supports json formatting.  client_socket should be named client_endpoint - WIP
+Currently supports json formatting.  
+
 Example:
 ```
 {
-  "client_socket": {
+  "log_level": "info",
+  "client_endpoint": {
     "address": "127.0.0.1",
     "port": 51821
   },
@@ -43,15 +42,23 @@ Example:
       "192.168.1.4:8921",
       "100.116.14.17:8921"
     ]
-  },
-  "log_level": "info"
+  }
 }
 
 ```
 - when switcher enabled is set to false, it would skip the switcher thread and ignore auto switching endpoints.
-- timer can be omitted if the switcher is set to false. Otherwise it would panic - WIP
+- timer can be omitted if the switcher is set to false. Otherwise it would panic 
 - log_level can be ommited, it will use zig's default log level in that case.
 - id is used to set an initial server endpoint. 
+
+## Explanation
+- log_level: Runtime logging level of the service.
+- client_endpoint: Endpoint of the wireguard client that wants to send packets to a server.
+- forwarder_socket: Socket that accepts packets from client_endpoint. 
+  In WireGuard client configuration you need to specify this as a peer endpoint for a server
+- server_socket: Socket that accepts packets from server.
+- switcher: function that does seamless endpoint switching. 
+  If set to false, use ID to set the index of your desired server endpoint.
 
 ---
 

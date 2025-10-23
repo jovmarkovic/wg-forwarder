@@ -177,7 +177,9 @@ pub fn main() !void {
         return error.InvalidArgs;
     }
     const path = args[2];
-    var config = try cfg.readFile(allocator, path);
+    var reader = try cfg.readFile(allocator, path);
+    defer allocator.free(reader.buf);
+    const config = reader.config;
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         log_level = level;
@@ -208,8 +210,8 @@ pub fn main() !void {
 
     // WireGuard -> Proxy
     const wg_listen_addr = try std.net.Address.parseIp4(
-        config.client_socket.address,
-        config.client_socket.port,
+        config.client_endpoint.address,
+        config.client_endpoint.port,
     );
     // Proxy
     const proxy_listen_addr = try std.net.Address.parseIp4(
