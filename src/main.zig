@@ -6,7 +6,6 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
     .log_level = .debug,
 };
-
 var log_level = std.log.default_level;
 
 // Function to set up runtime logging level
@@ -30,9 +29,11 @@ fn switcher(
 ) !void {
     // Unwrap timer  optional
     if (timer.*) |*t| {
+        // Declare constants once before the main loop
+        const elapsed = std.time.Timer.read(t);
+        const duration: u64 = std.time.ns_per_s * seconds;
+
         while (true) {
-            const elapsed = std.time.Timer.read(t);
-            const duration: u64 = std.time.ns_per_s * seconds;
             std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
             std.log.debug("Timer time duration: {d}\n", .{duration});
             std.log.debug("Timer packet_arrived state: {}\n", .{packet_arrived.*});
@@ -133,14 +134,14 @@ fn serverToWg(
             other_addrlen,
         )) |recv| {
             //  Converts other_addr to a correct struct that can be pretty formatted with {f}
-            const addr = std.net.Address.initPosix(tmp_addr);
             tmp_addr.* = other_addr.*;
+            const addr = std.net.Address.initPosix(tmp_addr);
             std.log.debug("Received {d} bytes, server: {f}\n", .{ recv, addr });
             const packet = srv_buf[0..recv];
             const server = servers[current_id.*];
             if (!std.net.Address.eql(addr, server)) {
                 std.log.warn("Wrong server responding: {f}\nCorrect server: {f}\n", .{ addr, server });
-                // If Received packet comes before sending packet is out at startup, set the correct state
+                // If Received packet comes before sending packet is out at startup, set the correct state and discard it
                 packet_arrived.* = false;
                 continue;
             }
@@ -181,7 +182,7 @@ pub fn main() !void {
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         log_level = level;
     } else {
-        std.log.err("Unknown log level:{s}\n", .{lvl});
+        std.log.err("Unknown log level:{s}\nAvailable log levels: err, warn, info, debug\n", .{lvl});
         std.process.exit(1);
     } else {
         std.log.info("Using default log level: {s}\n", .{@tagName(log_level)});
@@ -205,23 +206,24 @@ pub fn main() !void {
     );
     defer std.posix.close(serv_sock);
 
-    // WireGuard -> Proxy
+    // WireGuard -> Forwarder
     const wg_listen_addr = try std.net.Address.parseIp4(
         config.client_endpoint.address,
         config.client_endpoint.port,
     );
-    // Proxy
-    const proxy_listen_addr = try std.net.Address.parseIp4(
+
+    // Forwarder
+    const fw_listen_addr = try std.net.Address.parseIp4(
         config.forwarder_socket.address,
         config.forwarder_socket.port,
     );
     try std.posix.bind(
         wg_sock,
-        &proxy_listen_addr.any,
-        proxy_listen_addr.getOsSockLen(),
+        &fw_listen_addr.any,
+        fw_listen_addr.getOsSockLen(),
     );
 
-    // Proxy -> Server
+    // Server -> Forwarder
     const server_listen_addr = try std.net.Address.parseIp4(
         config.server_socket.address,
         config.server_socket.port,
@@ -246,6 +248,7 @@ pub fn main() !void {
         const port = try std.fmt.parseInt(u16, split.items[1], 10);
         servers[i] = try std.net.Address.parseIp4(ip, port);
     }
+
     // Set default server ID
     var current_id: usize = config.switcher.id;
 
@@ -253,12 +256,13 @@ pub fn main() !void {
     var buf: [9000]u8 = undefined;
     var srv_buf: [9000]u8 = undefined;
 
-    // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch servers.
+    // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch endpoints.
     // Block switcihing on every packet sent from server to client
     var timer: ?std.time.Timer = null;
     const time: ?usize = config.switcher.timer;
     var switcher_thread: ?std.Thread = null;
     var packet_arrived = true;
+
     // Comply with the switcher flag
     if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....\n", .{});

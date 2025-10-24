@@ -55,10 +55,27 @@ Example:
 - log_level: Runtime logging level of the service.
 - client_endpoint: Endpoint of the wireguard client that wants to send packets to a server.
 - forwarder_socket: Socket that accepts packets from client_endpoint. 
+
   In WireGuard client configuration you need to specify this as a peer endpoint for a server
 - server_socket: Socket that accepts packets from server.
 - switcher: function that does seamless endpoint switching. 
+
   If set to false, use ID to set the index of your desired server endpoint.
+
+## Options
+log_level: err, warn, info, debug
+
+addres: IPv4
+
+port: u16
+
+timer: seconds
+
+id: usize (u32 on x86 / u64 on x64)
+
+enabled: bool
+
+endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
 
 ---
 
