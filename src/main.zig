@@ -175,14 +175,14 @@ pub fn main() !void {
         return error.InvalidArgs;
     }
     const path = args[2];
-    var reader = try cfg.readFile(allocator, path);
+    const reader = try cfg.readFile(allocator, path);
     defer allocator.free(reader.buf);
     const config = reader.config;
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         log_level = level;
     } else {
-        std.log.err("Unknown log level:{s}\nAvailable log levels: err, warn, info, debug\n", .{lvl});
+        std.log.err("Unknown log level: {s}\nAvailable log levels: err, warn, info, debug\n", .{lvl});
         std.process.exit(1);
     } else {
         std.log.info("Using default log level: {s}\n", .{@tagName(log_level)});

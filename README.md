@@ -47,8 +47,9 @@ Example:
 
 ```
 - when switcher enabled is set to false, it would skip the switcher thread and ignore auto switching endpoints.
+- server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0", port: 0
 - timer can be omitted if the switcher is set to false. Otherwise it would panic 
-- log_level can be ommited, it will use zig's default log level in that case.
+- log_level can be omitted, it will use zig's default log level in that case.
 - id is used to set an initial server endpoint. 
 
 ## Explanation
@@ -57,7 +58,10 @@ Example:
 - forwarder_socket: Socket that accepts packets from client_endpoint. 
 
   In WireGuard client configuration you need to specify this as a peer endpoint for a server
-- server_socket: Socket that accepts packets from server.
+- server_socket: Socket that accepts from and sends packets to server. 
+  
+  When not set, kernel will decide which port to use and listen on all addresses.
+
 - switcher: function that does seamless endpoint switching. 
 
   If set to false, use ID to set the index of your desired server endpoint.
@@ -65,7 +69,7 @@ Example:
 ## Options
 log_level: err, warn, info, debug
 
-addres: IPv4
+address: IPv4
 
 port: u16
 

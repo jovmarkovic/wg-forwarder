@@ -8,13 +8,18 @@ const Reader = struct {
 const Config = struct {
     client_endpoint: Socket,
     forwarder_socket: Socket,
-    server_socket: Socket,
+    server_socket: SrvSocket = .{},
     switcher: Switcher,
     log_level: ?[]const u8 = null,
 
     const Socket = struct {
         address: []const u8,
         port: u16,
+    };
+
+    const SrvSocket = struct {
+        address: []const u8 = "0.0.0.0",
+        port: u16 = 0,
     };
 
     const Switcher = struct {
