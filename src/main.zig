@@ -1,5 +1,7 @@
 const std = @import("std");
 const cfg = @import("parser.zig");
+const builtin = @import("builtin");
+const ctime = @cImport(@cInclude("time.h"));
 
 // Comptime logging level set to debug
 pub const std_options: std.Options = .{
@@ -8,6 +10,16 @@ pub const std_options: std.Options = .{
 };
 var log_level = std.log.default_level;
 
+// datetime formatting from C library, only compiled on MacOS
+fn formatCurrentTime(_: void, w: *std.Io.Writer) !void {
+    const time = try w.writableSliceGreedy(64);
+    var now: ctime.time_t = ctime.time(null);
+    const timeinfo = ctime.localtime(&now);
+    const fmt = "%b %d %H:%M:%S"; // Example: "Oct 30 12:47:23"
+    const time_len = ctime.strftime(time.ptr, time.len, fmt, timeinfo);
+    w.advance(time_len);
+}
+
 // Function to set up runtime logging level
 fn logFn(
     comptime message_level: std.log.Level,
@@ -15,7 +27,21 @@ fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(message_level) <= @intFromEnum(log_level)) {
+    if (builtin.os.tag == .macos) {
+        var buf: [64]u8 = undefined;
+        const w = std.debug.lockStderrWriter(&buf);
+        defer std.debug.unlockStderrWriter();
+
+        w.print("{f} [{t}]", .{ std.fmt.Alt(void, formatCurrentTime){ .data = {} }, message_level }) catch return;
+        if (scope == .default) {
+            w.writeAll(": ") catch return;
+        } else {
+            w.print("({t}): ", .{scope}) catch return;
+        }
+        w.print(format, args) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch return;
+    } else {
         std.log.defaultLog(message_level, scope, format, args);
     }
 }
