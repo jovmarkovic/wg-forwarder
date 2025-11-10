@@ -13,8 +13,9 @@ var log_level = std.log.default_level;
 // datetime formatting from C library, only compiled on MacOS
 fn formatCurrentTime(_: void, w: *std.Io.Writer) !void {
     const time = try w.writableSliceGreedy(64);
+    var time_str: ctime.tm = undefined;
     var now: ctime.time_t = ctime.time(null);
-    const timeinfo = ctime.localtime(&now);
+    const timeinfo = ctime.localtime_r(&now, &time_str);
     const fmt = "%b %d %H:%M:%S"; // Example: "Oct 30 12:47:23"
     const time_len = ctime.strftime(time.ptr, time.len, fmt, timeinfo);
     w.advance(time_len);
