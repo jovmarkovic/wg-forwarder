@@ -33,24 +33,29 @@ fn logFn(
         const w = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
 
-        w.print("{f} [{t}]", .{ std.fmt.Alt(void, formatCurrentTime){ .data = {} }, message_level }) catch return;
+        w.@"0".print("{f} [{t}]", .{
+            std.fmt.Alt(void, formatCurrentTime){ .data = {} },
+            message_level,
+        }) catch return;
         if (scope == .default) {
-            w.writeAll(": ") catch return;
+            w.@"0".writeAll(": ") catch return;
         } else {
-            w.print("({t}): ", .{scope}) catch return;
+            w.@"0".print("({t}): ", .{scope}) catch return;
         }
-        w.print(format, args) catch return;
-        w.writeAll("\n") catch return;
-        w.flush() catch return;
+        w.@"0".print(format, args) catch return;
+        w.@"0".writeAll("\n") catch return;
+        w.@"0".flush() catch return;
     } else {
         std.log.defaultLog(message_level, scope, format, args);
     }
 }
 
+// TODO: Migrate to new std.Io.Clock sleep function
 fn switcher(
+    // io: std.Io,
     seconds: usize,
     timer: *?std.time.Timer,
-    servers: []std.net.Address,
+    servers: []std.Io.net.IpAddress,
     current_id: *usize,
     packet_arrived: *bool,
 ) !void {
@@ -59,6 +64,7 @@ fn switcher(
         // Declare constants once before the main loop
         const elapsed = std.time.Timer.read(t);
         const duration: u64 = std.time.ns_per_s * seconds;
+        const ns_per_s: u64 = 1_000_000_000;
 
         while (true) {
             std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
@@ -69,7 +75,9 @@ fn switcher(
             if (!packet_arrived.*) {
                 // Second check is if enough time has passsed before switching
                 if (elapsed < duration) {
-                    std.Thread.sleep(duration - elapsed);
+                    const current_sec = (duration - elapsed) / ns_per_s;
+                    const current_nsec = (duration - elapsed) % ns_per_s;
+                    std.posix.nanosleep(current_sec, current_nsec);
                     continue;
                 }
                 const new_id = (current_id.* + 1) % servers.len;
@@ -81,7 +89,7 @@ fn switcher(
             }
             // Reset timer to sync threads
             std.time.Timer.reset(t);
-            std.Thread.sleep(std.time.ns_per_s * seconds);
+            std.posix.nanosleep(seconds, 0);
         }
     } else {
         std.log.err("Switcher got called but timer variable did not unwrap: {any}\n", .{timer});
@@ -91,34 +99,21 @@ fn switcher(
 fn wgToServer(
     timer: *?std.time.Timer,
     packet_arrived: *bool,
-    wg_sock: c_int,
-    serv_sock: c_int,
+    io: std.Io,
+    wg_sock: *std.Io.net.Socket,
+    serv_sock: *std.Io.net.Socket,
     buf: []u8,
-    other_addr: *std.posix.sockaddr,
-    other_addrlen: *std.posix.socklen_t,
-    servers: []std.net.Address,
+    servers: []std.Io.net.IpAddress,
     current_id: *usize,
 ) !void {
     while (true) {
 
         // --- Handle WireGuard -> server ---
-        if (std.posix.recvfrom(
-            wg_sock,
-            buf[0..],
-            0,
-            other_addr,
-            other_addrlen,
-        )) |recv| {
-            std.log.debug("Received {d} bytes from WireGuard\n", .{recv});
-            const packet = buf[0..recv];
+        if (std.Io.net.Socket.receive(wg_sock, io, buf[0..])) |recv| {
+            std.log.debug("Received {d} bytes from WireGuard\n", .{recv.data.len});
+            const packet = buf[0..recv.data.len];
             std.log.debug("Trying to send to {f}\n", .{&servers[current_id.*]});
-            if (std.posix.sendto(
-                serv_sock,
-                packet,
-                0,
-                &servers[current_id.*].any,
-                servers[current_id.*].getOsSockLen(),
-            )) |_| {
+            if (std.Io.net.Socket.send(serv_sock, io, &servers[current_id.*], packet)) |_| {
                 // Unwrap timer optional
                 if (timer.*) |*t| if (packet_arrived.*) {
                     // Reset timer to sync threads and set packet_arrived state
@@ -138,47 +133,31 @@ fn wgToServer(
 }
 fn serverToWg(
     packet_arrived: *bool,
-    wg_sock: c_int,
-    serv_sock: c_int,
+    io: std.Io,
+    wg_sock: *std.Io.net.Socket,
+    serv_sock: *std.Io.net.Socket,
     srv_buf: []u8,
-    servers: []std.net.Address,
+    servers: []std.Io.net.IpAddress,
     current_id: *usize,
-    other_addr: *std.posix.sockaddr,
-    other_addrlen: *std.posix.socklen_t,
-    wg_addr: std.net.Address,
+    wg_addr: std.Io.net.IpAddress,
 ) !void {
     // Assign correct memory alignment so initPosix can work with it
-    const tmp_addr: *align(4) std.posix.sockaddr = @alignCast(other_addr);
 
     while (true) {
 
         // --- Handle server -> WireGuard ---
-        if (std.posix.recvfrom(
-            serv_sock,
-            srv_buf[0..],
-            0,
-            other_addr,
-            other_addrlen,
-        )) |recv| {
-            //  Converts other_addr to a correct struct that can be pretty formatted with {f}
-            tmp_addr.* = other_addr.*;
-            const addr = std.net.Address.initPosix(tmp_addr);
-            std.log.debug("Received {d} bytes, server: {f}\n", .{ recv, addr });
-            const packet = srv_buf[0..recv];
+        if (std.Io.net.Socket.receive(serv_sock, io, srv_buf[0..])) |recv| {
+            const addr = recv.from;
+            std.log.debug("Received {d} bytes, server: {f}\n", .{ recv.data.len, addr });
+            const packet = srv_buf[0..recv.data.len];
             const server = servers[current_id.*];
-            if (!std.net.Address.eql(addr, server)) {
+            if (!std.Io.net.IpAddress.eql(&addr, &server)) {
                 std.log.warn("Wrong server responding: {f}\nCorrect server: {f}\n", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, set the correct state and discard it
                 packet_arrived.* = false;
                 continue;
             }
-            if (std.posix.sendto(
-                wg_sock,
-                packet,
-                0,
-                &wg_addr.any,
-                wg_addr.getOsSockLen(),
-            )) |_| {
+            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) |_| {
                 // Confirm packet came from the server
                 packet_arrived.* = true;
             } else |err| {
@@ -195,6 +174,8 @@ fn serverToWg(
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
     const args = try std.process.argsAlloc(allocator);
+    var io_init = std.Io.Threaded.init_single_threaded;
+    const io = io_init.io();
     defer std.process.argsFree(allocator, args);
 
     if (args.len != 3) {
@@ -214,55 +195,40 @@ pub fn main() !void {
     } else {
         std.log.info("Using default log level: {s}\n", .{@tagName(log_level)});
     }
-    var other_addr: std.posix.sockaddr = undefined;
-    var other_addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-
-    // Listen for WireGuard (client) packets
-    const wg_sock = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.DGRAM,
-        std.posix.IPPROTO.UDP,
-    );
-    defer std.posix.close(wg_sock);
-
-    // Listen for Server packets
-    const serv_sock = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.DGRAM,
-        std.posix.IPPROTO.UDP,
-    );
-    defer std.posix.close(serv_sock);
 
     // WireGuard -> Forwarder
-    const wg_listen_addr = try std.net.Address.parseIp4(
+    const wg_listen_addr = try std.Io.net.IpAddress.parse(
         config.client_endpoint.address,
         config.client_endpoint.port,
     );
 
     // Forwarder
-    const fw_listen_addr = try std.net.Address.parseIp4(
+    const fw_listen_addr = try std.Io.net.IpAddress.parse(
         config.forwarder_socket.address,
         config.forwarder_socket.port,
     );
-    try std.posix.bind(
-        wg_sock,
-        &fw_listen_addr.any,
-        fw_listen_addr.getOsSockLen(),
-    );
+
+    // Listen for WireGuard (client) packets
+    var wg_sock = try std.Io.net.IpAddress.bind(&fw_listen_addr, io, .{
+        .ip6_only = false,
+        .mode = .dgram,
+        .protocol = .udp,
+    });
 
     // Server -> Forwarder
-    const server_listen_addr = try std.net.Address.parseIp4(
+    const server_listen_addr = try std.Io.net.IpAddress.parse(
         config.server_socket.address,
         config.server_socket.port,
     );
-    try std.posix.bind(
-        serv_sock,
-        &server_listen_addr.any,
-        server_listen_addr.getOsSockLen(),
-    );
+    // Listen for Server packets
+    var serv_sock = try std.Io.net.IpAddress.bind(&server_listen_addr, io, .{
+        .ip6_only = false,
+        .mode = .dgram,
+        .protocol = .udp,
+    });
 
     // Format read endpoints
-    var servers = try allocator.alloc(std.net.Address, config.switcher.endpoints.len);
+    var servers = try allocator.alloc(std.Io.net.IpAddress, config.switcher.endpoints.len);
     defer allocator.free(servers);
     for (config.switcher.endpoints, 0..) |s, i| {
         var split: std.ArrayList([]const u8) = .empty;
@@ -273,7 +239,7 @@ pub fn main() !void {
         }
         const ip = split.items[0];
         const port = try std.fmt.parseInt(u16, split.items[1], 10);
-        servers[i] = try std.net.Address.parseIp4(ip, port);
+        servers[i] = try std.Io.net.IpAddress.parse(ip, port);
     }
 
     // Set default server ID
@@ -283,7 +249,7 @@ pub fn main() !void {
     var buf: [9000]u8 = undefined;
     var srv_buf: [9000]u8 = undefined;
 
-    // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch endpoints.
+    // Timer for swithing logic and syncing threads. If time exceeds duration (specified in sec), switch endpoints.
     // Block switcihing on every packet sent from server to client
     var timer: ?std.time.Timer = null;
     const time: ?usize = config.switcher.timer;
@@ -291,10 +257,12 @@ pub fn main() !void {
     var packet_arrived = true;
 
     // Comply with the switcher flag
+    // TODO: Migrate to new std.Io.Clock sleep function
     if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....\n", .{});
         timer = try std.time.Timer.start();
         switcher_thread = try std.Thread.spawn(.{}, switcher, .{
+            // io,
             seconds,
             &timer,
             servers,
@@ -311,11 +279,10 @@ pub fn main() !void {
     const client_thread = try std.Thread.spawn(.{}, wgToServer, .{
         &timer,
         &packet_arrived,
-        wg_sock,
-        serv_sock,
+        io,
+        &wg_sock,
+        &serv_sock,
         &buf,
-        &other_addr,
-        &other_addrlen,
         servers,
         &current_id,
     });
@@ -323,13 +290,12 @@ pub fn main() !void {
     std.log.info("Spawning server listener....\n", .{});
     const server_thread = try std.Thread.spawn(.{}, serverToWg, .{
         &packet_arrived,
-        wg_sock,
-        serv_sock,
+        io,
+        &wg_sock,
+        &serv_sock,
         &srv_buf,
         servers,
         &current_id,
-        &other_addr,
-        &other_addrlen,
         wg_listen_addr,
     });
 
