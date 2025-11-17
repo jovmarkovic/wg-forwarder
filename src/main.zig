@@ -200,7 +200,11 @@ pub fn main() !void {
     if (args.len != 3) {
         std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
         return error.InvalidArgs;
+    } else if (!std.mem.eql(u8, args[1], "-c")) {
+        std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
+        return error.InvalidArgs;
     }
+
     const path = args[2];
     const reader = try cfg.readFile(allocator, path);
     defer allocator.free(reader.buf);
@@ -283,7 +287,7 @@ pub fn main() !void {
     var buf: [9000]u8 = undefined;
     var srv_buf: [9000]u8 = undefined;
 
-    // Timer for swithing logic and syncing threads. If time exceeds 19 sec, switch endpoints.
+    // Timer for swithing logic and syncing threads. If time exceeds duration (specified in sec), switch endpoints.
     // Block switcihing on every packet sent from server to client
     var timer: ?std.time.Timer = null;
     const time: ?usize = config.switcher.timer;
