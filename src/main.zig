@@ -50,9 +50,8 @@ fn logFn(
     }
 }
 
-// TODO: Migrate to new std.Io.Clock sleep function
 fn switcher(
-    // io: std.Io,
+    io: std.Io,
     seconds: usize,
     timer: *?std.time.Timer,
     servers: []std.Io.net.IpAddress,
@@ -64,7 +63,6 @@ fn switcher(
         // Declare constants once before the main loop
         const elapsed = std.time.Timer.read(t);
         const duration: u64 = std.time.ns_per_s * seconds;
-        const ns_per_s: u64 = 1_000_000_000;
 
         while (true) {
             std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
@@ -75,9 +73,7 @@ fn switcher(
             if (!packet_arrived.*) {
                 // Second check is if enough time has passsed before switching
                 if (elapsed < duration) {
-                    const current_sec = (duration - elapsed) / ns_per_s;
-                    const current_nsec = (duration - elapsed) % ns_per_s;
-                    std.posix.nanosleep(current_sec, current_nsec);
+                    try io.sleep(.fromNanoseconds(duration - elapsed), .awake);
                     continue;
                 }
                 const new_id = (current_id.* + 1) % servers.len;
@@ -89,7 +85,7 @@ fn switcher(
             }
             // Reset timer to sync threads
             std.time.Timer.reset(t);
-            std.posix.nanosleep(seconds, 0);
+            try io.sleep(.fromNanoseconds(duration), .awake);
         }
     } else {
         std.log.err("Switcher got called but timer variable did not unwrap: {any}\n", .{timer});
@@ -181,7 +177,7 @@ pub fn main() !void {
     if (args.len != 3) {
         std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
         return error.InvalidArgs;
-    } else if (!std.mem.eql([]u8, args[1], "-c")) {
+    } else if (!std.mem.eql(u8, args[1], "-c")) {
         std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
         return error.InvalidArgs;
     }
@@ -261,12 +257,11 @@ pub fn main() !void {
     var packet_arrived = true;
 
     // Comply with the switcher flag
-    // TODO: Migrate to new std.Io.Clock sleep function
     if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....\n", .{});
         timer = try std.time.Timer.start();
         switcher_thread = try std.Thread.spawn(.{}, switcher, .{
-            // io,
+            io,
             seconds,
             &timer,
             servers,
