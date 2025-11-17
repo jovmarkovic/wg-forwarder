@@ -181,7 +181,11 @@ pub fn main() !void {
     if (args.len != 3) {
         std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
         return error.InvalidArgs;
+    } else if (!std.mem.eql([]u8, args[1], "-c")) {
+        std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
+        return error.InvalidArgs;
     }
+
     const path = args[2];
     const reader = try cfg.readFile(allocator, path);
     defer allocator.free(reader.buf);
