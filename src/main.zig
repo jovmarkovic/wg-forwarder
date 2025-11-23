@@ -11,7 +11,7 @@ pub const std_options: std.Options = .{
 var log_level = std.log.default_level;
 
 // datetime formatting from C library, only compiled on MacOS
-fn formatCurrentTime(_: void, w: *std.Io.Writer) !void {
+fn currentTime(w: *std.Io.Writer) !void {
     const time = try w.writableSliceGreedy(64);
     var time_str: ctime.tm = undefined;
     var now: ctime.time_t = ctime.time(null);
@@ -30,21 +30,34 @@ fn logFn(
 ) void {
     if (builtin.os.tag == .macos) {
         var buf: [64]u8 = undefined;
-        const w = std.debug.lockStderrWriter(&buf);
+        const stderr, const ttyconfig = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
 
-        w.@"0".print("{f} [{t}]", .{
-            std.fmt.Alt(void, formatCurrentTime){ .data = {} },
-            message_level,
-        }) catch return;
-        if (scope == .default) {
-            w.@"0".writeAll(": ") catch return;
-        } else {
-            w.@"0".print("({t}): ", .{scope}) catch return;
+        ttyconfig.setColor(stderr, .reset) catch {};
+        currentTime(stderr) catch return;
+        stderr.writeAll(" ") catch return;
+
+        ttyconfig.setColor(stderr, switch (message_level) {
+            .err => .red,
+            .warn => .yellow,
+            .info => .green,
+            .debug => .magenta,
+        }) catch {};
+
+        ttyconfig.setColor(stderr, .bold) catch {};
+        stderr.writeAll("[") catch return;
+        stderr.writeAll(message_level.asText()) catch return;
+        stderr.writeAll("]") catch return;
+        ttyconfig.setColor(stderr, .reset) catch {};
+        ttyconfig.setColor(stderr, .dim) catch {};
+        ttyconfig.setColor(stderr, .bold) catch {};
+        if (scope != .default) {
+            stderr.print("({s})", .{@tagName(scope)}) catch return;
         }
-        w.@"0".print(format, args) catch return;
-        w.@"0".writeAll("\n") catch return;
-        w.@"0".flush() catch return;
+        stderr.writeAll(": ") catch return;
+        ttyconfig.setColor(stderr, .reset) catch {};
+        stderr.print(format ++ "\n", args) catch return;
+        stderr.flush() catch return;
     } else {
         std.log.defaultLog(message_level, scope, format, args);
     }
@@ -65,9 +78,9 @@ fn switcher(
         const duration: u64 = std.time.ns_per_s * seconds;
 
         while (true) {
-            std.log.debug("Timer time elapsed: {d}\n", .{elapsed});
-            std.log.debug("Timer time duration: {d}\n", .{duration});
-            std.log.debug("Timer packet_arrived state: {}\n", .{packet_arrived.*});
+            std.log.debug("Timer time elapsed: {d}", .{elapsed});
+            std.log.debug("Timer time duration: {d}", .{duration});
+            std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.*});
 
             // Main check is if packet has arrived
             if (!packet_arrived.*) {
@@ -78,8 +91,8 @@ fn switcher(
                 }
                 const new_id = (current_id.* + 1) % servers.len;
                 current_id.* = new_id;
-                std.log.info("Switched servers endpoints!\n", .{});
-                std.log.info("Current endpoint: {f}\n", .{&servers[current_id.*]});
+                std.log.info("Switched servers endpoints!", .{});
+                std.log.info("Current endpoint: {f}", .{&servers[current_id.*]});
                 // Reset packet state
                 packet_arrived.* = true;
             }
@@ -88,7 +101,7 @@ fn switcher(
             try io.sleep(.fromNanoseconds(duration), .awake);
         }
     } else {
-        std.log.err("Switcher got called but timer variable did not unwrap: {any}\n", .{timer});
+        std.log.err("Switcher got called but timer variable did not unwrap: {any}", .{timer});
         std.posix.exit(1);
     }
 }
@@ -106,9 +119,9 @@ fn wgToServer(
 
         // --- Handle WireGuard -> server ---
         if (std.Io.net.Socket.receive(wg_sock, io, buf[0..])) |recv| {
-            std.log.debug("Received {d} bytes from WireGuard\n", .{recv.data.len});
+            std.log.debug("Received {d} bytes from WireGuard", .{recv.data.len});
             const packet = buf[0..recv.data.len];
-            std.log.debug("Trying to send to {f}\n", .{&servers[current_id.*]});
+            std.log.debug("Trying to send to {f}", .{&servers[current_id.*]});
             if (std.Io.net.Socket.send(serv_sock, io, &servers[current_id.*], packet)) |_| {
                 // Unwrap timer optional
                 if (timer.*) |*t| if (packet_arrived.*) {
@@ -118,7 +131,7 @@ fn wgToServer(
                 };
             } else |err| {
                 std.log.err(
-                    "Backend {f} failed: {any}\n",
+                    "Backend {f} failed: {any}",
                     .{ servers[current_id.*], err },
                 );
             }
@@ -144,11 +157,11 @@ fn serverToWg(
         // --- Handle server -> WireGuard ---
         if (std.Io.net.Socket.receive(serv_sock, io, srv_buf[0..])) |recv| {
             const addr = recv.from;
-            std.log.debug("Received {d} bytes, server: {f}\n", .{ recv.data.len, addr });
+            std.log.debug("Received {d} bytes, server: {f}", .{ recv.data.len, addr });
             const packet = srv_buf[0..recv.data.len];
             const server = servers[current_id.*];
             if (!std.Io.net.IpAddress.eql(&addr, &server)) {
-                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}\n", .{ addr, server });
+                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, set the correct state and discard it
                 packet_arrived.* = false;
                 continue;
@@ -158,7 +171,7 @@ fn serverToWg(
                 packet_arrived.* = true;
             } else |err| {
                 std.log.err(
-                    "Backend {f} failed: {any}\n",
+                    "Backend {f} failed: {any}",
                     .{ wg_addr, err },
                 );
             }
@@ -175,10 +188,10 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len != 3) {
-        std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
+        std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
         return error.InvalidArgs;
     } else if (!std.mem.eql(u8, args[1], "-c")) {
-        std.log.err("Usage: {s} [-c] <config_path> \n", .{args[0]});
+        std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
         return error.InvalidArgs;
     }
 
@@ -190,10 +203,10 @@ pub fn main() !void {
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         log_level = level;
     } else {
-        std.log.err("Unknown log level: {s}\nAvailable log levels: err, warn, info, debug\n", .{lvl});
+        std.log.err("Unknown log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
         std.process.exit(1);
     } else {
-        std.log.info("Using default log level: {s}\n", .{@tagName(log_level)});
+        std.log.info("Using default log level: {s}", .{@tagName(log_level)});
     }
 
     // WireGuard -> Forwarder
@@ -258,7 +271,7 @@ pub fn main() !void {
 
     // Comply with the switcher flag
     if (config.switcher.enabled) if (time) |seconds| {
-        std.log.info("Spawning switcher thread....\n", .{});
+        std.log.info("Spawning switcher thread....", .{});
         timer = try std.time.Timer.start();
         switcher_thread = try std.Thread.spawn(.{}, switcher, .{
             io,
@@ -269,12 +282,12 @@ pub fn main() !void {
             &packet_arrived,
         });
     } else {
-        std.log.err("Switcher enabled but timer interval failed to unwrap: {any}\n", .{time});
+        std.log.err("Switcher enabled but timer interval failed to unwrap: {any}", .{time});
         std.posix.exit(1);
     } else {
-        std.log.info("Switching disabled, using endpoint derived form ID....\n", .{});
+        std.log.info("Switching disabled, using endpoint derived form ID....", .{});
     }
-    std.log.info("Spawning client listener....\n", .{});
+    std.log.info("Spawning client listener....", .{});
     const client_thread = try std.Thread.spawn(.{}, wgToServer, .{
         &timer,
         &packet_arrived,
@@ -286,7 +299,7 @@ pub fn main() !void {
         &current_id,
     });
 
-    std.log.info("Spawning server listener....\n", .{});
+    std.log.info("Spawning server listener....", .{});
     const server_thread = try std.Thread.spawn(.{}, serverToWg, .{
         &packet_arrived,
         io,
