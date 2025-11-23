@@ -30,30 +30,18 @@ fn logFn(
 ) void {
     if (builtin.os.tag == .macos) {
         var buf: [64]u8 = undefined;
-        const stderr, const ttyconf = std.debug.lockStderrWriter(&buf);
+        const stderr = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
 
-        ttyconf.setColor(stderr, .reset);
         currentTime(stderr) catch return;
         stderr.writeAll(" ");
-
-        ttyconf.setColor(stderr, switch (message_level) {
-            .err => .red,
-            .warn => .yellow,
-            .info => .green,
-            .debug => .magenta,
-        }) catch {};
-
-        ttyconf.setColor(stderr, .bold) catch {};
+        stderr.writeAll("[") catch return;
         stderr.writeAll(message_level.asText()) catch return;
-        ttyconf.setColor(stderr, .reset) catch {};
-        ttyconf.setColor(stderr, .dim) catch {};
-        ttyconf.setColor(stderr, .bold) catch {};
+        stderr.writeAll("]") catch return;
         if (scope != .default) {
             stderr.print("({s})", .{@tagName(scope)}) catch return;
         }
         stderr.writeAll(": ") catch return;
-        ttyconf.setColor(stderr, .reset) catch {};
         stderr.print(format ++ "\n", args) catch return;
         stderr.flush() catch return;
     } else {
@@ -212,10 +200,10 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     if (args.len != 3) {
-        std.log.err("Usage: {s} [-c] <config_path> ", .{args[0]});
+        std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
         return error.InvalidArgs;
     } else if (!std.mem.eql(u8, args[1], "-c")) {
-        std.log.err("Usage: {s} [-c] <config_path> ", .{args[0]});
+        std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
         return error.InvalidArgs;
     }
 
