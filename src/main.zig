@@ -74,10 +74,10 @@ fn switcher(
     // Unwrap timer  optional
     if (timer.*) |*t| {
         // Declare constants once before the main loop
-        const elapsed = std.time.Timer.read(t);
         const duration: u64 = std.time.ns_per_s * seconds;
 
         while (true) {
+            const elapsed = std.time.Timer.read(t);
             std.log.debug("Timer time elapsed: {d}", .{elapsed});
             std.log.debug("Timer time duration: {d}", .{duration});
             std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.*});
