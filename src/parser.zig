@@ -30,14 +30,15 @@ const Config = struct {
     };
 };
 
-pub fn readFile(allocator: std.mem.Allocator, path: []const u8) !Reader {
-    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-    const stat = try file.stat();
+pub fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Reader {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    const stat = try file.stat(io);
     const size = stat.size;
-    defer file.close();
+    defer file.close(io);
     const buf = try allocator.alloc(u8, size);
+    var reader = file.reader(io, buf);
     // Discard on success, return error if file.read fails
-    _ = try file.read(buf);
+    _ = try reader.interface.readSliceShort(buf);
 
     var parsed = try std.json.parseFromSlice(
         Config,
