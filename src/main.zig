@@ -8,7 +8,7 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
     .log_level = .debug,
 };
-var log_level = std.log.default_level;
+var runtime_level = std.log.default_level;
 
 // datetime formatting from C library, only compiled on MacOS
 fn currentTime(w: *std.Io.Writer) !void {
@@ -29,6 +29,7 @@ fn logFn(
     args: anytype,
 ) void {
     if (builtin.os.tag == .macos) {
+        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
         var buf: [64]u8 = undefined;
         const stderr, const ttyconfig = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
@@ -59,6 +60,7 @@ fn logFn(
         stderr.print(format ++ "\n", args) catch return;
         stderr.flush() catch return;
     } else {
+        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
         std.log.defaultLog(message_level, scope, format, args);
     }
 }
@@ -101,8 +103,8 @@ fn switcher(
             try io.sleep(.fromNanoseconds(duration), .awake);
         }
     } else {
-        std.log.err("Switcher got called but timer variable did not unwrap: {any}", .{timer});
-        std.posix.exit(1);
+        std.log.err("Switcher got called but timer variable value is: {any}", .{timer});
+        return error.FailedToUnwrap;
     }
 }
 fn wgToServer(
@@ -196,17 +198,17 @@ pub fn main() !void {
     }
 
     const path = args[2];
-    const reader = try cfg.readFile(allocator, path);
+    const reader = try cfg.readFile(io, allocator, path);
     defer allocator.free(reader.buf);
     const config = reader.config;
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
-        log_level = level;
+        runtime_level = level;
     } else {
-        std.log.err("Unknown log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
-        std.process.exit(1);
+        std.log.err("Tried to set log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
+        return error.UnknownLogLevel;
     } else {
-        std.log.info("Using default log level: {s}", .{@tagName(log_level)});
+        std.log.info("Using default log level: {s}", .{@tagName(runtime_level)});
     }
 
     // WireGuard -> Forwarder
@@ -282,8 +284,8 @@ pub fn main() !void {
             &packet_arrived,
         });
     } else {
-        std.log.err("Switcher enabled but timer interval failed to unwrap: {any}", .{time});
-        std.posix.exit(1);
+        std.log.debug("Switcher enabled but timer interval value is: {any}", .{time});
+        return error.FailedToUnwrap;
     } else {
         std.log.info("Switching disabled, using endpoint derived form ID....", .{});
     }
