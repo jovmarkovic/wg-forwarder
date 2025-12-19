@@ -34,7 +34,7 @@ fn logFn(
         defer std.debug.unlockStderrWriter();
 
         currentTime(stderr) catch return;
-        stderr.writeAll(" ");
+        stderr.writeAll(" ") catch return;
         stderr.writeAll("[") catch return;
         stderr.writeAll(message_level.asText()) catch return;
         stderr.writeAll("]") catch return;
@@ -86,8 +86,8 @@ fn switcher(
             std.Thread.sleep(std.time.ns_per_s * seconds);
         }
     } else {
-        std.log.err("Switcher got called but timer variable did not unwrap: {any}", .{timer});
-        std.posix.exit(1);
+        std.log.err("Switcher got called but timer variable value is: {any}", .{timer});
+        return error.FailedToUnwrap;
     }
 }
 fn wgToServer(
@@ -215,8 +215,8 @@ pub fn main() !void {
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         log_level = level;
     } else {
-        std.log.err("Unknown log level: {s}Available log levels: err, warn, info, debug", .{lvl});
-        std.process.exit(1);
+        std.log.err("Tried to set log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
+        return error.UnknownLogLevel;
     } else {
         std.log.info("Using default log level: {s}", .{@tagName(log_level)});
     }
@@ -308,8 +308,8 @@ pub fn main() !void {
             &packet_arrived,
         });
     } else {
-        std.log.err("Switcher enabled but timer interval failed to unwrap: {any}", .{time});
-        std.posix.exit(1);
+        std.log.debug("Switcher enabled but timer interval value is: {any}", .{time});
+        return error.FailedToUnwrap;
     } else {
         std.log.info("Switching disabled, using endpoint derived form ID....", .{});
     }
