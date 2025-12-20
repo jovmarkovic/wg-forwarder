@@ -39,12 +39,11 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8) !Reader {
     // Discard on success, return error if file.read fails
     _ = try file.read(buf);
 
-    var parsed = try std.json.parseFromSlice(
+    const parsed = try std.json.parseFromSliceLeaky(
         Config,
         allocator,
         buf,
         .{ .ignore_unknown_fields = true },
     );
-    defer parsed.deinit();
-    return Reader{ .config = parsed.value, .buf = buf };
+    return Reader{ .config = parsed, .buf = buf };
 }

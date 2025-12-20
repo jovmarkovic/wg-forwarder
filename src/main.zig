@@ -8,7 +8,7 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
     .log_level = .debug,
 };
-var log_level = std.log.default_level;
+var runtime_level = std.log.default_level;
 
 // datetime formatting from C library, only compiled on MacOS
 fn currentTime(w: *std.Io.Writer) !void {
@@ -29,6 +29,7 @@ fn logFn(
     args: anytype,
 ) void {
     if (builtin.os.tag == .macos) {
+        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
         var buf: [64]u8 = undefined;
         const stderr = std.debug.lockStderrWriter(&buf);
         defer std.debug.unlockStderrWriter();
@@ -45,6 +46,7 @@ fn logFn(
         stderr.print(format ++ "\n", args) catch return;
         stderr.flush() catch return;
     } else {
+        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
         std.log.defaultLog(message_level, scope, format, args);
     }
 }
@@ -169,7 +171,7 @@ fn serverToWg(
             const packet = srv_buf[0..recv];
             const server = servers[current_id.*];
             if (!std.net.Address.eql(addr, server)) {
-                std.log.warn("Wrong server responding: {f}Correct server: {f}", .{ addr, server });
+                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, set the correct state and discard it
                 packet_arrived.* = false;
                 continue;
@@ -213,12 +215,12 @@ pub fn main() !void {
     const config = reader.config;
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
-        log_level = level;
+        runtime_level = level;
     } else {
         std.log.err("Tried to set log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
         return error.UnknownLogLevel;
     } else {
-        std.log.info("Using default log level: {s}", .{@tagName(log_level)});
+        std.log.info("Using default log level: {s}", .{@tagName(runtime_level)});
     }
     var other_addr: std.posix.sockaddr = undefined;
     var other_addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
