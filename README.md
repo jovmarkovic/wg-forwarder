@@ -82,6 +82,9 @@ enabled: bool
 endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
 
 ---
+## Credits
+
+- Adjusted loging timestamp support provided by [ehrktia's zig-epoch](https://github.com/ehrktia/zig-epoch)
 
 ## Development
 

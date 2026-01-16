@@ -1,7 +1,7 @@
 const std = @import("std");
 const cfg = @import("parser.zig");
 const builtin = @import("builtin");
-const ctime = @cImport(@cInclude("time.h"));
+const timestamp = @import("timestamp.zig");
 
 // Comptime logging level set to debug
 pub const std_options: std.Options = .{
@@ -9,59 +9,48 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 var runtime_level = std.log.default_level;
-
-// datetime formatting from C library, only compiled on MacOS
-fn currentTime(w: *std.Io.Writer) !void {
-    const time = try w.writableSliceGreedy(64);
-    var time_str: ctime.tm = undefined;
-    var now: ctime.time_t = ctime.time(null);
-    const timeinfo = ctime.localtime_r(&now, &time_str);
-    const fmt = "%b %d %H:%M:%S"; // Example: "Oct 30 12:47:23"
-    const time_len = ctime.strftime(time.ptr, time.len, fmt, timeinfo);
-    w.advance(time_len);
-}
+var global_io: std.Io = undefined;
 
 // Function to set up runtime logging level
 fn logFn(
-    comptime message_level: std.log.Level,
+    comptime level: std.log.Level,
     comptime scope: @TypeOf(.enum_literal),
     comptime format: []const u8,
     args: anytype,
 ) void {
     if (builtin.os.tag == .macos) {
-        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
+        if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
         var buf: [64]u8 = undefined;
-        const stderr, const ttyconfig = std.debug.lockStderrWriter(&buf);
-        defer std.debug.unlockStderrWriter();
+        const t = std.debug.lockStderr(&buf).terminal();
+        defer std.debug.unlockStderr();
+        const ts = timestamp.Time.create(global_io);
 
-        ttyconfig.setColor(stderr, .reset) catch {};
-        currentTime(stderr) catch return;
-        stderr.writeAll(" ") catch return;
+        t.setColor(.reset) catch {};
+        t.writer.print("{f}", .{ts.fmt(.syslog)}) catch {};
+        t.writer.writeAll(" ") catch {};
 
-        ttyconfig.setColor(stderr, switch (message_level) {
+        t.setColor(switch (level) {
             .err => .red,
             .warn => .yellow,
             .info => .green,
             .debug => .magenta,
         }) catch {};
 
-        ttyconfig.setColor(stderr, .bold) catch {};
-        stderr.writeAll("[") catch return;
-        stderr.writeAll(message_level.asText()) catch return;
-        stderr.writeAll("]") catch return;
-        ttyconfig.setColor(stderr, .reset) catch {};
-        ttyconfig.setColor(stderr, .dim) catch {};
-        ttyconfig.setColor(stderr, .bold) catch {};
-        if (scope != .default) {
-            stderr.print("({s})", .{@tagName(scope)}) catch return;
-        }
-        stderr.writeAll(": ") catch return;
-        ttyconfig.setColor(stderr, .reset) catch {};
-        stderr.print(format ++ "\n", args) catch return;
-        stderr.flush() catch return;
+        t.setColor(.bold) catch {};
+        t.writer.writeAll("[") catch {};
+        t.writer.writeAll(level.asText()) catch {};
+        t.writer.writeAll("]") catch {};
+        t.setColor(.reset) catch {};
+        t.setColor(.dim) catch {};
+        t.setColor(.bold) catch {};
+        if (scope != .default) t.writer.print("({s})", .{@tagName(scope)}) catch {};
+        t.writer.writeAll(": ") catch {};
+        t.setColor(.reset) catch {};
+        t.writer.print(format ++ "\n", args) catch {};
+        t.writer.flush() catch {};
     } else {
-        if (@intFromEnum(message_level) > @intFromEnum(runtime_level)) return;
-        std.log.defaultLog(message_level, scope, format, args);
+        if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
+        std.log.defaultLog(level, scope, format, args);
     }
 }
 
@@ -182,12 +171,14 @@ fn serverToWg(
         }
     }
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
-    const args = try std.process.argsAlloc(allocator);
+    const args = try init.args.toSlice(allocator);
     var io_init = std.Io.Threaded.init_single_threaded;
     const io = io_init.io();
-    defer std.process.argsFree(allocator, args);
+    global_io = io;
+
+    defer allocator.free(args);
 
     if (args.len != 3) {
         std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
