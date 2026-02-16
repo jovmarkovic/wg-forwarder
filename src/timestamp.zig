@@ -76,11 +76,7 @@ pub const Time = struct {
             self: Formatter,
             writer: *std.Io.Writer,
         ) !void {
-            const timestamp = clock.now(
-                real_clock,
-                self.time.io,
-            ) catch |e|
-                std.debug.panic("failed to get clock: {any}\n", .{e});
+            const timestamp = clock.now(real_clock, self.time.io);
 
             const parts = getTimeParts(timestamp);
 

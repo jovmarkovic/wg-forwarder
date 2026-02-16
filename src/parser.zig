@@ -31,14 +31,16 @@ const Config = struct {
 };
 
 pub fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Reader {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
-    const stat = try file.stat(io);
-    const size = stat.size;
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_only,
+        .lock = .exclusive,
+    });
     defer file.close(io);
-    const buf = try allocator.alloc(u8, size);
+
+    const buf = try allocator.alloc(u8, try file.length(io));
     var reader = file.reader(io, buf);
     // Discard on success, return error if file.read fails
-    _ = try reader.interface.readSliceShort(buf);
+    try reader.interface.readSliceAll(buf);
 
     var parsed = try std.json.parseFromSlice(
         Config,

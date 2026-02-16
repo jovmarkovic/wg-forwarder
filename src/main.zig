@@ -9,7 +9,6 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 var runtime_level = std.log.default_level;
-var global_io: std.Io = undefined;
 
 // Function to set up runtime logging level
 fn logFn(
@@ -18,46 +17,30 @@ fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
+    // Custom check for changing runtime logging
+    if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
+
+    // Copy-pasted implemetntion of defaultLog() from std.log
+    const io = std.Options.debug_io;
+    const prev = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(prev);
+    var buffer: [64]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buffer).terminal();
+    defer std.debug.unlockStderr();
+
     if (builtin.os.tag == .macos) {
-        if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
-        var buf: [64]u8 = undefined;
-        const t = std.debug.lockStderr(&buf).terminal();
-        defer std.debug.unlockStderr();
-        const ts = timestamp.Time.create(global_io);
-
-        t.setColor(.reset) catch {};
-        t.writer.print("{f}", .{ts.fmt(.syslog)}) catch {};
-        t.writer.writeAll(" ") catch {};
-
-        t.setColor(switch (level) {
-            .err => .red,
-            .warn => .yellow,
-            .info => .green,
-            .debug => .magenta,
-        }) catch {};
-
-        t.setColor(.bold) catch {};
-        t.writer.writeAll("[") catch {};
-        t.writer.writeAll(level.asText()) catch {};
-        t.writer.writeAll("]") catch {};
-        t.setColor(.reset) catch {};
-        t.setColor(.dim) catch {};
-        t.setColor(.bold) catch {};
-        if (scope != .default) t.writer.print("({s})", .{@tagName(scope)}) catch {};
-        t.writer.writeAll(": ") catch {};
-        t.setColor(.reset) catch {};
-        t.writer.print(format ++ "\n", args) catch {};
-        t.writer.flush() catch {};
-    } else {
-        if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
-        std.log.defaultLog(level, scope, format, args);
+        // Added timestamp to output
+        const ts = timestamp.Time.create(io);
+        stderr.writer.print("{f} ", .{ts.fmt(.now)}) catch {};
     }
+    // Same return that std.log.defaultLog() does
+    return std.log.defaultLogFileTerminal(level, scope, format, args, stderr) catch {};
 }
 
 fn switcher(
     io: std.Io,
     seconds: usize,
-    timer: *?std.time.Timer,
+    timer: *?std.Io.Clock.Timestamp,
     servers: []std.Io.net.IpAddress,
     current_id: *usize,
     packet_arrived: *bool,
@@ -68,7 +51,7 @@ fn switcher(
         const duration: u64 = std.time.ns_per_s * seconds;
 
         while (true) {
-            const elapsed = std.time.Timer.read(t);
+            const elapsed = t.untilNow(io).raw.nanoseconds;
             std.log.debug("Timer time elapsed: {d}", .{elapsed});
             std.log.debug("Timer time duration: {d}", .{duration});
             std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.*});
@@ -88,7 +71,7 @@ fn switcher(
                 packet_arrived.* = true;
             }
             // Reset timer to sync threads
-            std.time.Timer.reset(t);
+            t.* = std.Io.Clock.Timestamp.now(io, .awake);
             try io.sleep(.fromNanoseconds(duration), .awake);
         }
     } else {
@@ -97,7 +80,7 @@ fn switcher(
     }
 }
 fn wgToServer(
-    timer: *?std.time.Timer,
+    timer: *?std.Io.Clock.Timestamp,
     packet_arrived: *bool,
     io: std.Io,
     wg_sock: *std.Io.net.Socket,
@@ -117,7 +100,7 @@ fn wgToServer(
                 // Unwrap timer optional
                 if (timer.*) |*t| if (packet_arrived.*) {
                     // Reset timer to sync threads and set packet_arrived state
-                    std.time.Timer.reset(t);
+                    t.* = std.Io.Clock.Timestamp.now(io, .awake);
                     packet_arrived.* = false;
                 };
             } else |err| {
@@ -141,8 +124,6 @@ fn serverToWg(
     current_id: *usize,
     wg_addr: std.Io.net.IpAddress,
 ) !void {
-    // Assign correct memory alignment so initPosix can work with it
-
     while (true) {
 
         // --- Handle server -> WireGuard ---
@@ -176,7 +157,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = try init.args.toSlice(allocator);
     var io_init = std.Io.Threaded.init_single_threaded;
     const io = io_init.io();
-    global_io = io;
 
     defer allocator.free(args);
 
@@ -257,7 +237,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Timer for swithing logic and syncing threads. If time exceeds duration (specified in sec), switch endpoints.
     // Block switcihing on every packet sent from server to client
-    var timer: ?std.time.Timer = null;
+    var timer: ?std.Io.Clock.Timestamp = null;
     const time: ?usize = config.switcher.timer;
     var switcher_thread: ?std.Thread = null;
     var packet_arrived = true;
@@ -265,7 +245,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Comply with the switcher flag
     if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....", .{});
-        timer = try std.time.Timer.start();
+        timer = std.Io.Clock.Timestamp.now(io, .awake);
         switcher_thread = try std.Thread.spawn(.{}, switcher, .{
             io,
             seconds,
