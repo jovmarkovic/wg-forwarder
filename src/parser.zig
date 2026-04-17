@@ -39,7 +39,7 @@ pub fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Rea
 
     const buf = try allocator.alloc(u8, try file.length(io));
     var reader = file.reader(io, buf);
-    // Discard on success, return error if file.read fails
+    // Read all content of a file into buffer
     try reader.interface.readSliceAll(buf);
 
     var parsed = try std.json.parseFromSlice(

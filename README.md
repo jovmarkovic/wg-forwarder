@@ -73,7 +73,7 @@ address: IPv4
 
 port: u16
 
-timer: seconds
+timer: (usize) seconds 
 
 id: usize (u32 on x86 / u64 on x64)
 
