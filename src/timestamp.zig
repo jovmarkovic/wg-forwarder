@@ -7,8 +7,6 @@ const day_epoch_seconds = std.time.epoch.DaySeconds;
 const epoch_day = std.time.epoch.EpochDay;
 const epoch_year_day = std.time.epoch.YearAndDay;
 
-const real_clock = clock.real;
-
 const MONTH_NAMES = [12][]const u8{
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -76,7 +74,7 @@ pub const Time = struct {
             self: Formatter,
             writer: *std.Io.Writer,
         ) !void {
-            const timestamp = clock.now(real_clock, self.time.io);
+            const timestamp = clock.now(.real, self.time.io);
 
             const parts = getTimeParts(timestamp);
 
@@ -124,13 +122,13 @@ test "Time struct formatting" {
 
     // Test 'now()'
     const now = tnow.fmt(.now);
-    const buf_now = try std.fmt.allocPrint(alloc, "{f}\n", .{now});
+    const buf_now = try std.fmt.allocPrint(alloc, "{f}", .{now});
     defer alloc.free(buf_now);
-    std.debug.assert(buf_now.len == 24);
+    std.debug.assert(buf_now.len == 23);
 
     //  Test 'syslog()'
     const syslog = tnow.fmt(.syslog);
-    const buf_syslog = try std.fmt.allocPrint(alloc, "{f}\n", .{syslog});
+    const buf_syslog = try std.fmt.allocPrint(alloc, "{f}", .{syslog});
     defer alloc.free(buf_syslog);
-    std.debug.assert(buf_syslog.len == 16);
+    std.debug.assert(buf_syslog.len == 15);
 }

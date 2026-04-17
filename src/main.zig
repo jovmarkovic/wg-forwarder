@@ -39,40 +39,41 @@ fn logFn(
 
 fn switcher(
     io: std.Io,
-    seconds: usize,
-    timer: *?std.Io.Clock.Timestamp,
+    seconds: isize,
+    timer: *?std.atomic.Value(i64),
     servers: []std.Io.net.IpAddress,
-    current_id: *usize,
-    packet_arrived: *bool,
+    current_id: *std.atomic.Value(usize),
+    packet_arrived: *std.atomic.Value(bool),
 ) !void {
     // Unwrap timer  optional
     if (timer.*) |*t| {
         // Declare constants once before the main loop
-        const duration: u64 = std.time.ns_per_s * seconds;
+        const duration = seconds;
 
         while (true) {
-            const elapsed = t.untilNow(io).raw.nanoseconds;
+            const now = std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds();
+            const elapsed = now - t.load(.monotonic);
             std.log.debug("Timer time elapsed: {d}", .{elapsed});
             std.log.debug("Timer time duration: {d}", .{duration});
-            std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.*});
+            std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.load(.monotonic)});
 
             // Main check is if packet has arrived
-            if (!packet_arrived.*) {
+            if (!packet_arrived.load(.monotonic)) {
                 // Second check is if enough time has passsed before switching
                 if (elapsed < duration) {
-                    try io.sleep(.fromNanoseconds(duration - elapsed), .awake);
+                    try io.sleep(.fromSeconds(duration - elapsed), .awake);
                     continue;
                 }
-                const new_id = (current_id.* + 1) % servers.len;
-                current_id.* = new_id;
+                const new_id = (current_id.load(.monotonic) + 1) % servers.len;
+                current_id.store(new_id, .release);
                 std.log.info("Switched servers endpoints!", .{});
-                std.log.info("Current endpoint: {f}", .{&servers[current_id.*]});
+                std.log.info("Current endpoint: {f}", .{&servers[current_id.load(.monotonic)]});
                 // Reset packet state
-                packet_arrived.* = true;
+                packet_arrived.store(true, .monotonic);
             }
-            // Reset timer to sync threads
-            t.* = std.Io.Clock.Timestamp.now(io, .awake);
-            try io.sleep(.fromNanoseconds(duration), .awake);
+            // Reset time to sync threads
+            t.store(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds(), .monotonic);
+            try io.sleep(.fromSeconds(duration), .awake);
         }
     } else {
         std.log.err("Switcher got called but timer variable value is: {any}", .{timer});
@@ -80,14 +81,14 @@ fn switcher(
     }
 }
 fn wgToServer(
-    timer: *?std.Io.Clock.Timestamp,
-    packet_arrived: *bool,
+    timer: *?std.atomic.Value(i64),
+    packet_arrived: *std.atomic.Value(bool),
     io: std.Io,
     wg_sock: *std.Io.net.Socket,
     serv_sock: *std.Io.net.Socket,
     buf: []u8,
     servers: []std.Io.net.IpAddress,
-    current_id: *usize,
+    current_id: *std.atomic.Value(usize),
 ) !void {
     while (true) {
 
@@ -95,18 +96,18 @@ fn wgToServer(
         if (std.Io.net.Socket.receive(wg_sock, io, buf[0..])) |recv| {
             std.log.debug("Received {d} bytes from WireGuard", .{recv.data.len});
             const packet = buf[0..recv.data.len];
-            std.log.debug("Trying to send to {f}", .{&servers[current_id.*]});
-            if (std.Io.net.Socket.send(serv_sock, io, &servers[current_id.*], packet)) |_| {
+            std.log.debug("Trying to send to {f}", .{&servers[current_id.load(.monotonic)]});
+            if (std.Io.net.Socket.send(serv_sock, io, &servers[current_id.load(.acquire)], packet)) {
                 // Unwrap timer optional
-                if (timer.*) |*t| if (packet_arrived.*) {
+                if (timer.*) |*t| if (packet_arrived.load(.monotonic)) {
                     // Reset timer to sync threads and set packet_arrived state
-                    t.* = std.Io.Clock.Timestamp.now(io, .awake);
-                    packet_arrived.* = false;
+                    t.store(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds(), .monotonic);
+                    packet_arrived.store(false, .monotonic);
                 };
             } else |err| {
                 std.log.err(
                     "Backend {f} failed: {any}",
-                    .{ servers[current_id.*], err },
+                    .{ servers[current_id.load(.acquire)], err },
                 );
             }
         } else |err| {
@@ -115,13 +116,13 @@ fn wgToServer(
     }
 }
 fn serverToWg(
-    packet_arrived: *bool,
+    packet_arrived: *std.atomic.Value(bool),
     io: std.Io,
     wg_sock: *std.Io.net.Socket,
     serv_sock: *std.Io.net.Socket,
     srv_buf: []u8,
     servers: []std.Io.net.IpAddress,
-    current_id: *usize,
+    current_id: *std.atomic.Value(usize),
     wg_addr: std.Io.net.IpAddress,
 ) !void {
     while (true) {
@@ -131,16 +132,16 @@ fn serverToWg(
             const addr = recv.from;
             std.log.debug("Received {d} bytes, server: {f}", .{ recv.data.len, addr });
             const packet = srv_buf[0..recv.data.len];
-            const server = servers[current_id.*];
+            const server = servers[current_id.load(.acquire)];
             if (!std.Io.net.IpAddress.eql(&addr, &server)) {
                 std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, set the correct state and discard it
-                packet_arrived.* = false;
+                packet_arrived.store(false, .monotonic);
                 continue;
             }
-            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) |_| {
+            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) {
                 // Confirm packet came from the server
-                packet_arrived.* = true;
+                packet_arrived.store(true, .monotonic);
             } else |err| {
                 std.log.err(
                     "Backend {f} failed: {any}",
@@ -152,13 +153,22 @@ fn serverToWg(
         }
     }
 }
+
+// Source_buffer holds data from cleint
+var source_buffer: [9000]u8 = undefined;
+// Server_buffer hold data from server
+var server_buffer: [9000]u8 = undefined;
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
-    const args = try init.args.toSlice(allocator);
-    var io_init = std.Io.Threaded.init_single_threaded;
-    const io = io_init.io();
 
+    const args = try init.args.toSlice(allocator);
     defer allocator.free(args);
+
+    var io_init = std.Io.Threaded.init_single_threaded;
+    defer io_init.deinit();
+
+    const io = io_init.io();
 
     if (args.len != 3) {
         std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
@@ -229,23 +239,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Set default server ID
-    var current_id: usize = config.switcher.id;
-
-    // Buffers for holding packets. buf -> cleint; srv_buf -> server;
-    var buf: [9000]u8 = undefined;
-    var srv_buf: [9000]u8 = undefined;
+    var current_id = std.atomic.Value(usize).init(config.switcher.id);
 
     // Timer for swithing logic and syncing threads. If time exceeds duration (specified in sec), switch endpoints.
     // Block switcihing on every packet sent from server to client
-    var timer: ?std.Io.Clock.Timestamp = null;
-    const time: ?usize = config.switcher.timer;
+    var timer: ?std.atomic.Value(i64) = null;
+    const time: ?isize = if (config.switcher.timer) |t|
+        @intCast(@min(t, std.math.maxInt(isize)))
+    else
+        null;
+
     var switcher_thread: ?std.Thread = null;
-    var packet_arrived = true;
+    var packet_arrived = std.atomic.Value(bool).init(true);
 
     // Comply with the switcher flag
     if (config.switcher.enabled) if (time) |seconds| {
         std.log.info("Spawning switcher thread....", .{});
-        timer = std.Io.Clock.Timestamp.now(io, .awake);
+        timer = std.atomic.Value(i64).init(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds());
         switcher_thread = try std.Thread.spawn(.{}, switcher, .{
             io,
             seconds,
@@ -267,7 +277,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         io,
         &wg_sock,
         &serv_sock,
-        &buf,
+        &source_buffer,
         servers,
         &current_id,
     });
@@ -278,7 +288,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         io,
         &wg_sock,
         &serv_sock,
-        &srv_buf,
+        &server_buffer,
         servers,
         &current_id,
         wg_listen_addr,
