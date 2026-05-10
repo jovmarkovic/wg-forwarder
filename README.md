@@ -43,14 +43,20 @@ Example:
       "100.116.14.17:8921"
     ]
   }
+  "admin_console": {
+    "enabled": false,
+    "address": 127.0.0.1,
+    "port": 9000,
+  }
 }
 
 ```
 - when switcher enabled is set to false, it would skip the switcher thread and ignore auto switching endpoints.
 - server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0", port: 0
 - timer can be omitted if the switcher is set to false. Otherwise it would panic 
-- log_level can be omitted, it will use zig's default log level in that case.
+- log_level can be omitted, it will use Zig's default log level in that case.
 - id is used to set an initial server endpoint. 
+- admin_console structure can be omitted, Defaults for it are: enabled: false, address: "127.0.0.1", port: "9000"
 
 ## Explanation
 - log_level: Runtime logging level of the service.
@@ -66,20 +72,64 @@ Example:
 
   If set to false, use ID to set the index of your desired server endpoint.
 
-## Options
-log_level: err, warn, info, debug
+- admin_console: function that opens up server endpoint for chagning forwarder's runtime state. 
 
-address: IPv4
 
-port: u16
+## Configuration types
+- log_level: err, warn, info, debug
 
-timer: (usize) seconds 
+- address: IPv4
 
-id: usize (u32 on x86 / u64 on x64)
+- port: u16
 
-enabled: bool
+- timer: (usize) seconds 
 
-endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
+- id: usize (u32 on x86 / u64 on x64)
+
+- enabled: bool
+
+- endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
+
+
+## Admin server options
+Admin server has three states, global, endpoint and switcher.
+Connecting to it via `telnet` or `nc` for example, will set a global state.
+
+Currently supported commands in states:
+```
+Available Global Commands:
+  help (?)        - Show this message
+  list            - List all available endpoints
+  status (info)   - Show switcher status and current server info
+  switcher        - Interactively manage switcher
+  endpoint        - Interactively manage endpoint
+  exit/quit (q)   - Close the admin connection
+
+Available Endpoint Commands:
+  help (?)        - Show this message
+  list            - List all available endpoints
+  add ip:port     - Adds one or more endpoints
+                      Use 'ip:port ip:port' with out qotes to add multiple
+  remove (rm) <n> - Remove endpoint by ID
+  set <n>         - Manually set the active endpoint ID
+  find ip:port    - Find ID from the address 
+  status (info)   - Show switcher status and current server info
+  switcher        - Interactively manage switcher 
+  return (ret)    - Return to global session state
+  exit/quit (q)   - Close the admin connection
+
+Available Switcher Commands:
+  help (?)        - Show this message
+  status (info)   - Show switcher status and current server info
+  play            - Resume/start the switcher thread
+  pause           - Suspend the switcher thread
+  kill            - Completely stop the switcher thread
+  timer           - Set timer duration for siwtcher thread
+  endpoint        - Interactively manage endpoint
+  return (ret)    - Return to global session state
+  exit/quit (q)   - Close the admin connection
+
+```
 
 ---
 ## Credits
