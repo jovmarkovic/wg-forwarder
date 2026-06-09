@@ -56,5 +56,5 @@ pub fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Reader {
         .{ .ignore_unknown_fields = true },
     );
     defer parsed.deinit();
-    return Reader{ .config = parsed.value, .buf = buf };
+    return .{ .config = parsed.value, .buf = buf };
 }

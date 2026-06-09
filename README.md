@@ -138,7 +138,7 @@ Available Switcher Commands:
 
 ## Development
 
-* Requires [Zig 0.16.0-dev+](https://ziglang.org/download/)
+* Requires [Zig 0.17.0-dev+](https://ziglang.org/download/)
 * Uses Zig standard library only.
 * Source files are in the `src/` directory.
 * Build script: `build.zig`

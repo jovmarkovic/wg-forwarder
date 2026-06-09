@@ -97,7 +97,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Listen for WireGuard (client) packets
     var wg_sock = try std.Io.net.IpAddress.bind(&fw_listen_addr, io, .{
-        .ip6_only = false,
         .mode = .dgram,
         .protocol = .udp,
     });
@@ -109,7 +108,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     );
     // Listen for Endpoint packets
     var endpoint_sock = try std.Io.net.IpAddress.bind(&endpoint_listen_addr, io, .{
-        .ip6_only = false,
         .mode = .dgram,
         .protocol = .udp,
     });
@@ -134,7 +132,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var current_id: std.atomic.Value(usize) = .init(config.switcher.id);
 
     // Siwtcher struct holds all atomics
-    var switcher = lib.SwitcherState{
+    var switcher: lib.SwitcherState = .{
         .is_running = .init(config.switcher.enabled),
         .io = io,
         .duration = .init(@intCast(config.switcher.timer)),
@@ -190,7 +188,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (admin_server) |t| {
         t.join();
     }
-    switcher.stop();
+    defer switcher.stop();
     client_thread.join();
     endpoint_thread.join();
 }

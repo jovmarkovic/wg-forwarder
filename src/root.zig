@@ -24,7 +24,7 @@ pub const SwitcherState = struct {
     pub fn run(self: *Self) !void {
         while (self.is_running.load(.monotonic)) {
             // Handle pausing, resuming and stopping of the thread
-            if (threadHandler(self)) break;
+            if (!threadHandler(self)) break;
 
             // actual work
             const duration = self.duration.load(.acquire);
@@ -274,7 +274,7 @@ pub const SafeEndpointList = struct {
 
     /// Only use while locked!
     /// Use this in Admin thread to remove endpoint at specific index
-    pub fn orderedRemoveUnsafe(self: *Self, index: usize) !std.Io.net.IpAddress {
+    pub fn orderedRemoveUnsafe(self: *Self, index: usize) std.Io.net.IpAddress {
         return self.list.orderedRemove(index);
     }
 
