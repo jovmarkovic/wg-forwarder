@@ -115,7 +115,7 @@ pub const Time = struct {
     io: std.Io,
 
     pub fn create(io: std.Io) Time {
-        return Time{ .io = io };
+        return .{ .io = io };
     }
 
     /// Entry point for formatting. Use as: .{time.fmt(.now)}

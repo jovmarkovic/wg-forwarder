@@ -289,7 +289,7 @@ fn handleEndpoint(
 
     if (EndpointCmd.from(raw_cmd)) |cmd| {
         switch (cmd) {
-            .add => try addEndpoint(
+            .add => try endpointAdd(
                 io,
                 gpa,
                 conn,
@@ -297,7 +297,7 @@ fn handleEndpoint(
                 iter,
                 endpoints,
             ),
-            .remove, .rm => try removeEndpoint(
+            .remove, .rm => try endpointRemove(
                 io,
                 conn,
                 msg_buf,
@@ -305,7 +305,7 @@ fn handleEndpoint(
                 endpoints,
                 current_id,
             ),
-            .set => try setEndpoint(
+            .set => try endpointSet(
                 io,
                 conn,
                 msg_buf,
@@ -313,7 +313,7 @@ fn handleEndpoint(
                 endpoints,
                 current_id,
             ),
-            .find => try findID(
+            .find => try endpointFindID(
                 io,
                 conn,
                 msg_buf,
@@ -380,10 +380,10 @@ fn handleSwitcher(
     }
     if (SwitcherCmd.from(raw_cmd)) |cmd| {
         switch (cmd) {
-            .play => try handlePlay(io, conn, switcher),
-            .pause => try handlePause(io, conn, switcher),
-            .kill => try handleKill(io, conn, switcher),
-            .timer => try handleTimer(io, conn, iter, msg_buf, switcher),
+            .play => try switcherPlay(io, conn, switcher),
+            .pause => try switcherPause(io, conn, switcher),
+            .kill => try switcherKill(io, conn, switcher),
+            .timer => try switcherTime(io, conn, iter, msg_buf, switcher),
             .@"return", .ret => ctx.* = .global,
         }
         printPrompt(io, conn, ctx.*);
@@ -392,6 +392,8 @@ fn handleSwitcher(
     reply(io, conn, "Unknown command!\n");
     printPrompt(io, conn, ctx.*);
 }
+
+/// Status (info)
 fn showStatus(
     io: std.Io,
     conn: std.Io.net.Stream,
@@ -426,6 +428,7 @@ fn showStatus(
     return;
 }
 
+/// List
 fn listEndpoints(
     io: std.Io,
     conn: std.Io.net.Stream,
@@ -443,7 +446,8 @@ fn listEndpoints(
     }
 }
 
-fn findID(
+/// Find
+fn endpointFindID(
     io: std.Io,
     conn: std.Io.net.Stream,
     msg_buf: []u8,
@@ -492,7 +496,8 @@ fn findID(
     reply(io, conn, msg);
 }
 
-fn setEndpoint(
+/// Set
+fn endpointSet(
     io: std.Io,
     conn: std.Io.net.Stream,
     msg_buf: []u8,
@@ -532,7 +537,8 @@ fn setEndpoint(
     );
 }
 
-fn addEndpoint(
+/// Add
+fn endpointAdd(
     io: std.Io,
     gpa: std.mem.Allocator,
     conn: std.Io.net.Stream,
@@ -595,7 +601,8 @@ fn addEndpoint(
     if (nothing_provided) reply(io, conn, "Use 'add <ip:port>' format!");
 }
 
-fn removeEndpoint(
+/// Remove (rm)
+fn endpointRemove(
     io: std.Io,
     conn: std.Io.net.Stream,
     msg_buf: []u8,
@@ -660,7 +667,7 @@ fn removeEndpoint(
     );
 }
 
-fn handlePlay(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
+fn switcherPlay(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
     if (switcher.is_running.load(.acquire)) {
         switcher.play();
         reply(io, conn, "Switcher thread resumed.\n");
@@ -670,17 +677,17 @@ fn handlePlay(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState)
     }
 }
 
-fn handlePause(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
+fn switcherPause(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
     switcher.pause();
     reply(io, conn, "Switcher thread paused.\n");
 }
 
-fn handleKill(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
+fn switcherKill(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
     switcher.stop();
     reply(io, conn, "Switcher thread terminated.\n");
 }
 
-fn handleTimer(
+fn switcherTime(
     io: std.Io,
     conn: std.Io.net.Stream,
     iter: *std.mem.TokenIterator(u8, .any),

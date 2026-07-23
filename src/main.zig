@@ -141,6 +141,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .endpoints = &endpoints,
         .current_id = &current_id,
     };
+    // Deffering stop to run after joining other threads
+    defer switcher.stop();
 
     var admin_server: ?std.Thread = null;
     if (config.admin_console.enabled) {
@@ -185,10 +187,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         &current_id,
     });
 
+    // Thread joining
     if (admin_server) |t| {
         t.join();
     }
-    defer switcher.stop();
     client_thread.join();
     endpoint_thread.join();
 }
