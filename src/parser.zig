@@ -1,8 +1,19 @@
 const std = @import("std");
 
 const Reader = struct {
-    config: Config,
+    parsed: std.json.Parsed(Config),
     buf: []u8,
+
+    /// Helper to get quick access to the config fields
+    pub fn config(self: *const Reader) *const Config {
+        return &self.parsed.value;
+    }
+
+    /// Deinit of the parsed structure and a buffer that holds the data
+    pub fn deinit(self: Reader, gpa: std.mem.Allocator) void {
+        self.parsed.deinit();
+        gpa.free(self.buf);
+    }
 };
 
 const Config = struct {
@@ -45,16 +56,18 @@ pub fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Reader {
     defer file.close(io);
 
     const buf = try gpa.alloc(u8, try file.length(io));
+    // Only on error, it holds actual data where parser is pointing to
+    errdefer gpa.free(buf);
+
     var reader = file.reader(io, buf);
     // Read all content of a file into buffer
     try reader.interface.readSliceAll(buf);
 
-    var parsed = try std.json.parseFromSlice(
+    const parsed = try std.json.parseFromSlice(
         Config,
         gpa,
         buf,
-        .{ .ignore_unknown_fields = true },
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed },
     );
-    defer parsed.deinit();
-    return .{ .config = parsed.value, .buf = buf };
+    return .{ .parsed = parsed, .buf = buf };
 }

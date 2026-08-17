@@ -45,7 +45,7 @@ var source_buffer: [9000]u8 = undefined;
 var endpoint_buffer: [9000]u8 = undefined;
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var dbga: std.heap.DebugAllocator(.{}) = .init;
+    var dbga: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = dbga.deinit();
 
     const allocator = switch (builtin.mode) {
@@ -71,8 +71,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const path = args[2];
     const reader = try cfg.readFile(io, allocator, path);
-    defer allocator.free(reader.buf);
-    const config = reader.config;
+    defer reader.deinit(allocator);
+    const config = reader.config();
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -137,7 +137,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .io = io,
         .duration = .init(@intCast(config.switcher.timer)),
         .timer = .init(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds()),
-        .packet_arrived = .init(true),
+        .packet_arrived = .init(false),
         .endpoints = &endpoints,
         .current_id = &current_id,
     };
