@@ -520,7 +520,7 @@ fn endpointSet(
     // Unlock on finish
     defer endpoints.unlockShared(io);
 
-    if (requested_id >= endpoints.len(io)) {
+    if (requested_id >= endpoints.lenUnsafe()) {
         reply(io, conn, "Error: ID out of bounds\n");
         return;
     }

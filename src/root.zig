@@ -278,6 +278,11 @@ pub const SafeEndpointList = struct {
         return self.list.orderedRemove(index);
     }
 
+    /// Only use while locked!
+    /// Use this to get current array length
+    pub fn lenUnsafe(self: *Self) usize {
+        return self.list.items.len;
+    }
     /// Use this to get current array length
     pub fn len(self: *Self, io: std.Io) usize {
         self.lock.lockSharedUncancelable(io);
