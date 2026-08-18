@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const reader = try cfg.readFile(io, allocator, path);
     defer reader.deinit(allocator);
     const config = reader.config();
-    try cfg.validate(config);
+    try cfg.validate(config.*);
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -158,8 +158,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     // Comply with the switcher flag
     if (config.switcher.enabled) {
-        std.log.info("Spawning switcher thread....", .{});
-        try switcher.start();
+        _ = try switcher.startOrPlay();
     } else {
         std.log.info("Switching disabled, using endpoint derived form ID....", .{});
     }
@@ -189,7 +188,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Thread joining
     if (admin_server) |t| {
         t.join();
+        std.log.info("Stopping admin server thread....", .{});
     }
     client_thread.join();
+    std.log.info("Stopping client listener....", .{});
     endpoint_thread.join();
+    std.log.info("Stopping server listener....", .{});
 }

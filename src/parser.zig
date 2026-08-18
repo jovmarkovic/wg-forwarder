@@ -83,9 +83,12 @@ pub fn validate(cfg: Config) error{InvalidConfig}!void {
         if (sw.timer == null) {
             std.log.err("config: switcher.enabled is true but switcher.timer is missing", .{});
             bad = true;
-        } else if (sw.timer.? == 0) {
-            std.log.warn("config: switcher.timer is 0 seconds, consider changing it!", .{});
-        } else if (sw.id >= n and n != 0) {
+        }
+        if (sw.timer.? == 0) {
+            std.log.err("config: switcher.timer is 0 seconds", .{});
+            bad = true;
+        }
+        if (sw.id >= n and n != 0) {
             std.log.err(
                 "config: switcher.id is {d} but only {d} endpoints are defined",
                 .{ sw.id, n },

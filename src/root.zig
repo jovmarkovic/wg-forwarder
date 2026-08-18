@@ -1,6 +1,12 @@
 const std = @import("std");
 const cfg = @import("parser.zig");
 
+pub const PlayOutcome = enum {
+    started,
+    resumed,
+    already_running,
+};
+
 pub const SwitcherState = struct {
     const Self = @This();
     mutex: std.Io.Mutex = .init,
@@ -55,24 +61,45 @@ pub const SwitcherState = struct {
         self.cond.broadcast(self.io);
     }
 
-    /// Starts a switcher thread
-    pub fn start(self: *Self) !void {
+    /// Starts or resumes a switcher thread
+    pub fn startOrPlay(self: *Self) !PlayOutcome {
+        self.reapIfExited();
+
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.thread != null) return; // Already running
+        // A live handle and a running flag are set and cleared together.
+        std.debug.assert((self.thread != null) == self.is_running);
+
+        if (self.is_running and self.thread != null) {
+            if (!self.is_paused) return .already_running;
+
+            self.is_paused = false;
+            self.wake_requested = true;
+            self.cond.broadcast(self.io);
+            return .resumed;
+        }
+
+        if (self.duration == null) return error.NoTimerConfigured;
 
         //set the states
         self.is_running = true;
+        errdefer self.is_running = false;
         self.is_paused = false;
+        self.wake_requested = false;
 
         // Use 'self' as the only argument because the struct has been inited
+        std.log.info("Spawning switcher thread....", .{});
         self.thread = try std.Thread.spawn(.{}, Self.run, .{self});
+        return .started;
     }
 
     /// Stops a switcher thread
     pub fn stop(self: *Self) void {
         self.mutex.lockUncancelable(self.io);
+
+        // A live handle and a running flag are set and cleared together.
+        std.debug.assert((self.thread != null) == self.is_running);
 
         self.is_running = false;
         self.wake_requested = true;
@@ -83,15 +110,7 @@ pub const SwitcherState = struct {
         self.mutex.unlock(self.io);
 
         if (handle) |t| t.join();
-    }
-
-    /// Resumes a switcher thread
-    pub fn play(self: *Self) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-
-        self.is_paused = false;
-        self.cond.signal(self.io); // Wake it up!
+        std.log.info("Stopping switcher thread....", .{});
     }
 
     /// Pauses a switcher thread
@@ -119,6 +138,21 @@ pub const SwitcherState = struct {
         }
     }
 
+    /// Join a thread that exited on its own, so a stale handle can never block a
+    /// restart or be overwritten unjoined.
+    fn reapIfExited(self: *Self) void {
+        var stale: ?std.Thread = null;
+        {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (!self.is_running and self.thread != null) {
+                stale = self.thread;
+                self.thread = null;
+            }
+        }
+        if (stale) |t| t.join(); // must be outside the lock
+    }
+
     /// Blocks while paused. Returns the current duration, or null if we should exit.
     fn threadHandler(self: *Self) ?i64 {
         self.mutex.lockUncancelable(self.io);
@@ -129,7 +163,7 @@ pub const SwitcherState = struct {
         }
         self.wake_requested = false; // don't leave a stale wake for the next waitFor
         if (!self.is_running) return null;
-        return self.duration;
+        return self.duration.?;
     }
 
     /// Wait up to `duration`, waking early on any state change.

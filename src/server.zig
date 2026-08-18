@@ -297,7 +297,7 @@ fn handleEndpoint(
                 iter,
                 endpoints,
             ),
-            .remove, .rm => try endpointRemove(
+            .remove, .rm => endpointRemove(
                 io,
                 conn,
                 msg_buf,
@@ -380,10 +380,10 @@ fn handleSwitcher(
     }
     if (SwitcherCmd.from(raw_cmd)) |cmd| {
         switch (cmd) {
-            .play => try switcherPlay(io, conn, switcher),
-            .pause => try switcherPause(io, conn, switcher),
-            .kill => try switcherKill(io, conn, switcher),
-            .timer => try switcherTime(io, conn, iter, msg_buf, switcher),
+            .play => switcherPlay(io, conn, msg_buf, switcher),
+            .pause => switcherPause(io, conn, switcher),
+            .kill => switcherKill(io, conn, switcher),
+            .timer => switcherTime(io, conn, iter, msg_buf, switcher),
             .@"return", .ret => ctx.* = .global,
         }
         printPrompt(io, conn, ctx.*);
@@ -566,21 +566,21 @@ fn endpointAdd(
         };
 
         const port = std.fmt.parseInt(u16, port_part, 10) catch {
-            const msg = try std.fmt.bufPrint(
+            const msg = std.fmt.bufPrint(
                 msg_buf,
                 "Error: Invalid port number: {s}\n",
                 .{port_part},
-            );
+            ) catch "Error: Invalid port number!\n";
             reply(io, conn, msg);
             continue;
         };
 
         const addr = std.Io.net.IpAddress.parse(ip_part, port) catch {
-            const msg = try std.fmt.bufPrint(
+            const msg = std.fmt.bufPrint(
                 msg_buf,
                 "Error: Could not parse IP address: {s}\n",
                 .{full_addr},
-            );
+            ) catch "Error: Could not parse IP address!\n";
             reply(io, conn, msg);
             continue;
         };
@@ -593,7 +593,11 @@ fn endpointAdd(
         // Using current len and adding an item to array creates a valid ID
         const id = endpoints.len(io);
 
-        const msg = try std.fmt.bufPrint(msg_buf, "Added ID: {d} address: {f}\n", .{ id, addr });
+        const msg = std.fmt.bufPrint(
+            msg_buf,
+            "Added ID: {d} address: {f}\n",
+            .{ id, addr },
+        ) catch "Added ID!\n";
         if (conn.socket.send(io, &conn.socket.address, msg)) {
             try endpoints.addUnsafe(gpa, addr);
             std.log.info("Admin added ID: {d} address: {f}", .{ id, addr });
@@ -613,7 +617,7 @@ fn endpointRemove(
     iter: *std.mem.TokenIterator(u8, .any),
     endpoints: *lib.SafeEndpointList,
     current_id: *std.atomic.Value(usize),
-) !void {
+) void {
     const arg = iter.next() orelse {
         reply(io, conn, "Error: Missing ID\n");
         return;
@@ -638,7 +642,11 @@ fn endpointRemove(
 
     const addrs = endpoints.getItems();
     const addr = addrs[id];
-    const msg = try std.fmt.bufPrint(msg_buf, "Removed ID: {d} address: {f}\n", .{ id, addr });
+    const msg = std.fmt.bufPrint(
+        msg_buf,
+        "Removed ID: {d} address: {f}\n",
+        .{ id, addr },
+    ) catch "Removed ID!\n";
 
     if (conn.socket.send(io, &conn.socket.address, msg)) {
         if (id == list_len - 1) {
@@ -661,7 +669,12 @@ fn endpointRemove(
 
                 // Attempt to update. If current changed in another thread,
                 // cmpxchgWeak updates 'current' and returns an error, looping again.
-                current = current_id.cmpxchgWeak(current, new, .release, .acquire) orelse break;
+                current = current_id.cmpxchgWeak(
+                    current,
+                    new,
+                    .release,
+                    .acquire,
+                ) orelse break;
             }
         }
         std.log.info("Admin removed ID: {d} address: {f}", .{ id, addr });
@@ -671,26 +684,44 @@ fn endpointRemove(
     );
 }
 
-fn switcherPlay(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
-    // Removing atomics requires using mutex
-    switcher.mutex.lockUncancelable(io);
-    defer switcher.mutex.unlock(io);
+fn switcherPlay(
+    io: std.Io,
+    conn: std.Io.net.Stream,
+    msg_buf: []u8,
+    switcher: *lib.SwitcherState,
+) void {
+    const outcome = switcher.startOrPlay() catch |err| {
+        const msg: []const u8 = switch (err) {
+            error.NoTimerConfigured => "Error: no timer configured. Use 'timer <seconds>' first.\n",
+            else => blk: {
+                // Log only system error
+                std.log.err("switcher start failed: {s}", .{@errorName(err)});
+                break :blk
+                // Send more complete error message in a reply if buffer allows it
+                std.fmt.bufPrint(
+                    msg_buf,
+                    "Error: could not start switcher: {s}\n",
+                    .{@errorName(err)},
+                ) catch "Error: could not start switcher.\n";
+            },
+        };
+        reply(io, conn, msg);
+        return;
+    };
 
-    if (switcher.is_running) {
-        switcher.play();
-        reply(io, conn, "Switcher thread resumed.\n");
-    } else {
-        try switcher.start();
-        reply(io, conn, "Switcher thread started.\n");
-    }
+    reply(io, conn, switch (outcome) {
+        .started => "Switcher thread started.\n",
+        .resumed => "Switcher thread resumed.\n",
+        .already_running => "Switcher is already running.\n",
+    });
 }
 
-fn switcherPause(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
+fn switcherPause(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) void {
     switcher.pause();
     reply(io, conn, "Switcher thread paused.\n");
 }
 
-fn switcherKill(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
+fn switcherKill(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) void {
     switcher.stop();
     reply(io, conn, "Switcher thread terminated.\n");
 }
@@ -701,7 +732,7 @@ fn switcherTime(
     iter: *std.mem.TokenIterator(u8, .any),
     msg_buf: []u8,
     switcher: *lib.SwitcherState,
-) !void {
+) void {
     const arg = iter.next() orelse {
         reply(io, conn, "Error: Missing seconds!\n");
         return;
@@ -717,7 +748,11 @@ fn switcherTime(
         return;
     }
 
-    const msg = try std.fmt.bufPrint(msg_buf, "Switcher timer set to {d}s.\n", .{new_seconds});
+    const msg = std.fmt.bufPrint(
+        msg_buf,
+        "Switcher timer set to {d}s.\n",
+        .{new_seconds},
+    ) catch "Switcher timer set!\n";
     if (conn.socket.send(io, &conn.socket.address, msg)) {
         switcher.setDuration(new_seconds);
         std.log.info("Admin set timer duration: {d}s", .{new_seconds});
