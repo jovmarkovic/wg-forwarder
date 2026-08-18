@@ -15,38 +15,33 @@ pub const SwitcherState = struct {
     thread: ?std.Thread = null,
 
     io: std.Io,
-    timer: std.atomic.Value(i64) = .init(0), // Just a placeholder, correct value is set in start()
-    duration: i64, // manipulated by mutex
-    packet_arrived: std.atomic.Value(bool) = .init(true), // Default is true to correctly init wgToServer
+    duration: ?i64, // manipulated by mutex
+    last_send_at: std.atomic.Value(i64) = .init(0),
+    last_reply_at: std.atomic.Value(i64) = .init(0),
     endpoints: *SafeEndpointList,
     current_id: *std.atomic.Value(usize),
 
     /// Switcher function
     pub fn run(self: *Self) void {
         while (true) {
-
             // Blocks while paused; null means exit. One lock, one snapshot.
             const duration = self.threadHandler() orelse break;
 
             const now = nowSeconds(self.io);
-            const elapsed = now - self.timer.load(.monotonic);
-            std.log.debug("switcher: elapsed={d} duration={d} packet_arrived={}", .{
-                elapsed, duration, self.packet_arrived.load(.monotonic),
+            const last_send = self.last_send_at.load(.monotonic);
+            const last_reply = self.last_reply_at.load(.monotonic);
+            std.log.debug("switcher: duration={d} last_send={d} last_reply={d}", .{
+                duration, last_send, last_reply,
             });
-
-            // Main check: if packet has arrived
-            if (!self.packet_arrived.load(.monotonic)) {
-                // Second check: if enough time has passsed before switching
-                if (elapsed < duration) {
-                    if (!self.waitFor(duration - elapsed)) break;
-                    continue;
-                }
-                // Run actual switch logic
+            // Only judge the endpoint if we've spoken to it since it last spoke to us,
+            // and it has been silent for `duration`.
+            if (last_send > last_reply and now - last_reply >= duration) {
                 self.switchEndpoint();
+                // give the new endpoint a fresh window
+                self.last_reply_at.store(nowSeconds(self.io), .monotonic);
             }
 
-            // Reset time to sync threads
-            self.timer.store(nowSeconds(self.io), .monotonic);
+            // Sleep at the end for duration
             if (!self.waitFor(duration)) break;
         }
     }
@@ -70,9 +65,6 @@ pub const SwitcherState = struct {
         //set the states
         self.is_running = true;
         self.is_paused = false;
-
-        // reset the timer upon staring a thread
-        self.timer.store(nowSeconds(self.io), .monotonic);
 
         // Use 'self' as the only argument because the struct has been inited
         self.thread = try std.Thread.spawn(.{}, Self.run, .{self});
@@ -122,8 +114,6 @@ pub const SwitcherState = struct {
         if (self.endpoints.getCopy(self.io, new_id)) |server| {
             self.current_id.store(new_id, .release);
             std.log.info("Switched to ID: {d} address: {f}", .{ new_id, server });
-            // Reset packet state
-            self.packet_arrived.store(true, .monotonic);
         } else {
             std.log.warn("switcher: failed to get server endpoint!", .{});
         }
@@ -190,12 +180,7 @@ pub fn wgToServer(
             };
             std.log.debug("Trying to send to {f}", .{endpoint});
             if (std.Io.net.Socket.send(serv_sock, io, &endpoint, packet)) {
-                // Set a new timer only if packet came from the server and reset packet_arrived
-                if (switcher.packet_arrived.load(.monotonic)) {
-                    // Reset timer to sync threads and set packet_arrived state
-                    switcher.timer.store(nowSeconds(io), .monotonic);
-                    switcher.packet_arrived.store(false, .monotonic);
-                }
+                switcher.last_send_at.store(nowSeconds(io), .monotonic);
             } else |err| {
                 std.log.err("Backend send failed to: {f} {s}", .{ endpoint, @errorName(err) });
             }
@@ -228,13 +213,11 @@ pub fn serverToWg(
             };
             if (!std.Io.net.IpAddress.eql(&addr, &endpoint)) {
                 std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, endpoint });
-                // If Received packet comes before sending packet is out at startup, set the correct state and discard it
-                switcher.packet_arrived.store(false, .monotonic);
                 continue;
             }
             if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) {
                 // Confirm packet came from the server
-                switcher.packet_arrived.store(true, .monotonic);
+                switcher.last_reply_at.store(nowSeconds(io), .monotonic);
             } else |err| {
                 std.log.err("Backend send failed to: {f} {s}", .{ wg_addr, @errorName(err) });
             }

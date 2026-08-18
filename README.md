@@ -82,9 +82,9 @@ Example:
 
 - port: u16
 
-- timer: (usize) seconds 
+- timer: (u32) seconds 
 
-- id: usize (u32 on x86 / u64 on x64)
+- id: u32
 
 - enabled: bool
 

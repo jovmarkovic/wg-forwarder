@@ -73,6 +73,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const reader = try cfg.readFile(io, allocator, path);
     defer reader.deinit(allocator);
     const config = reader.config();
+    try cfg.validate(config);
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -135,7 +136,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var switcher: lib.SwitcherState = .{
         .is_running = config.switcher.enabled,
         .io = io,
-        .duration = @intCast(config.switcher.timer),
+        .duration = if (config.switcher.timer) |t| t else null,
         .endpoints = &endpoints,
         .current_id = &current_id,
     };

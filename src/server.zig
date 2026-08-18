@@ -411,7 +411,7 @@ fn showStatus(
     const paused = switcher.is_paused;
 
     const state_str = if (!running) "DEAD" else if (paused) "PAUSED" else "RUNNING";
-    const timer = switcher.duration;
+    const timer = switcher.duration orelse 0;
 
     const endpoint = endpoints.getCopy(io, id) orelse {
         const msg = try std.fmt.bufPrint(
