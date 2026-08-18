@@ -51,7 +51,7 @@ Example:
 }
 
 ```
-- when switcher enabled is set to false, it would skip the switcher thread and ignore auto switching endpoints.
+- when switcher enabled is set to false, it would skip starting the switcher thread and ignore auto switching endpoints.
 - server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0", port: 0
 - timer can be omitted if the switcher is set to false. Otherwise it would panic 
 - log_level can be omitted, it will use Zig's default log level in that case.

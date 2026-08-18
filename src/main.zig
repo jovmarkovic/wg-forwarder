@@ -133,11 +133,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Siwtcher struct holds all atomics
     var switcher: lib.SwitcherState = .{
-        .is_running = .init(config.switcher.enabled),
+        .is_running = config.switcher.enabled,
         .io = io,
-        .duration = .init(@intCast(config.switcher.timer)),
-        .timer = .init(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds()),
-        .packet_arrived = .init(false),
+        .duration = @intCast(config.switcher.timer),
         .endpoints = &endpoints,
         .current_id = &current_id,
     };

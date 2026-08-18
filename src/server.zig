@@ -402,12 +402,16 @@ fn showStatus(
     endpoints: *lib.SafeEndpointList,
     current_id: *std.atomic.Value(usize),
 ) !void {
+    // Removing atomics requires using mutex
+    switcher.mutex.lockUncancelable(io);
+    defer switcher.mutex.unlock(io);
+
     const id = current_id.load(.acquire);
-    const running = switcher.is_running.load(.monotonic);
-    const paused = switcher.is_paused; // Note: Accessing bool outside lock for status is usually fine
+    const running = switcher.is_running;
+    const paused = switcher.is_paused;
 
     const state_str = if (!running) "DEAD" else if (paused) "PAUSED" else "RUNNING";
-    const timer = switcher.duration.load(.acquire);
+    const timer = switcher.duration;
 
     const endpoint = endpoints.getCopy(io, id) orelse {
         const msg = try std.fmt.bufPrint(
@@ -668,7 +672,11 @@ fn endpointRemove(
 }
 
 fn switcherPlay(io: std.Io, conn: std.Io.net.Stream, switcher: *lib.SwitcherState) !void {
-    if (switcher.is_running.load(.acquire)) {
+    // Removing atomics requires using mutex
+    switcher.mutex.lockUncancelable(io);
+    defer switcher.mutex.unlock(io);
+
+    if (switcher.is_running) {
         switcher.play();
         reply(io, conn, "Switcher thread resumed.\n");
     } else {
@@ -711,7 +719,7 @@ fn switcherTime(
 
     const msg = try std.fmt.bufPrint(msg_buf, "Switcher timer set to {d}s.\n", .{new_seconds});
     if (conn.socket.send(io, &conn.socket.address, msg)) {
-        switcher.duration.store(new_seconds, .release);
+        switcher.setDuration(new_seconds);
         std.log.info("Admin set timer duration: {d}s", .{new_seconds});
     } else |err| std.log.warn(
         "Ignoring setting timer duration. Admin reply failed: {s}",

@@ -3,64 +3,61 @@ const cfg = @import("parser.zig");
 
 pub const SwitcherState = struct {
     const Self = @This();
-    mutex: std.Io.Mutex = std.Io.Mutex.init,
-    cond: std.Io.Condition = std.Io.Condition.init,
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
 
-    // Controls
-    is_running: std.atomic.Value(bool),
+    // Controls; manipulated by mutex
+    is_running: bool,
     is_paused: bool = false,
+    wake_requested: bool = false,
 
     // Thread handle to allow re-spawning
     thread: ?std.Thread = null,
 
     io: std.Io,
-    duration: std.atomic.Value(isize),
-    timer: std.atomic.Value(i64),
-    packet_arrived: std.atomic.Value(bool),
+    timer: std.atomic.Value(i64) = .init(0), // Just a placeholder, correct value is set in start()
+    duration: i64, // manipulated by mutex
+    packet_arrived: std.atomic.Value(bool) = .init(true), // Default is true to correctly init wgToServer
     endpoints: *SafeEndpointList,
     current_id: *std.atomic.Value(usize),
 
     /// Switcher function
-    pub fn run(self: *Self) !void {
-        while (self.is_running.load(.monotonic)) {
-            // Handle pausing, resuming and stopping of the thread
-            if (!threadHandler(self)) break;
+    pub fn run(self: *Self) void {
+        while (true) {
 
-            // actual work
-            const duration = self.duration.load(.acquire);
+            // Blocks while paused; null means exit. One lock, one snapshot.
+            const duration = self.threadHandler() orelse break;
 
-            const now = std.Io.Clock.Timestamp.now(self.io, .awake).raw.toSeconds();
+            const now = nowSeconds(self.io);
             const elapsed = now - self.timer.load(.monotonic);
-            std.log.debug("Timer time elapsed: {d}", .{elapsed});
-            std.log.debug("Timer time duration: {d}", .{duration});
-            std.log.debug("Timer packet_arrived state: {}", .{self.packet_arrived.load(.monotonic)});
+            std.log.debug("switcher: elapsed={d} duration={d} packet_arrived={}", .{
+                elapsed, duration, self.packet_arrived.load(.monotonic),
+            });
 
-            // Main check is if packet has arrived
+            // Main check: if packet has arrived
             if (!self.packet_arrived.load(.monotonic)) {
-                // Second check is if enough time has passsed before switching
+                // Second check: if enough time has passsed before switching
                 if (elapsed < duration) {
-                    try self.io.sleep(.fromSeconds(duration - elapsed), .awake);
+                    if (!self.waitFor(duration - elapsed)) break;
                     continue;
                 }
-                const new_id = if (self.endpoints.len(self.io) > 0)
-                    (self.current_id.load(.monotonic) + 1) % self.endpoints.len(self.io)
-                else
-                    0;
-                self.current_id.store(new_id, .release);
-
-                if (self.endpoints.getCopy(self.io, new_id)) |server| {
-                    std.log.info("Switched to ID: {d} address: {f}", .{ new_id, server });
-                    // Reset packet state
-                    self.packet_arrived.store(true, .monotonic);
-                } else {
-                    std.log.warn("switcher failed to get server endpoint!", .{});
-                }
+                // Run actual switch logic
+                self.switchEndpoint();
             }
 
             // Reset time to sync threads
-            self.timer.store(std.Io.Clock.Timestamp.now(self.io, .awake).raw.toSeconds(), .monotonic);
-            try self.io.sleep(.fromSeconds(duration), .awake);
+            self.timer.store(nowSeconds(self.io), .monotonic);
+            if (!self.waitFor(duration)) break;
         }
+    }
+
+    /// Sets the duration of switcher's sleep
+    pub fn setDuration(self: *Self, seconds: i64) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.duration = seconds;
+        self.wake_requested = true;
+        self.cond.broadcast(self.io);
     }
 
     /// Starts a switcher thread
@@ -70,8 +67,12 @@ pub const SwitcherState = struct {
 
         if (self.thread != null) return; // Already running
 
-        self.is_running.store(true, .release);
+        //set the states
+        self.is_running = true;
         self.is_paused = false;
+
+        // reset the timer upon staring a thread
+        self.timer.store(nowSeconds(self.io), .monotonic);
 
         // Use 'self' as the only argument because the struct has been inited
         self.thread = try std.Thread.spawn(.{}, Self.run, .{self});
@@ -79,12 +80,17 @@ pub const SwitcherState = struct {
 
     /// Stops a switcher thread
     pub fn stop(self: *Self) void {
-        self.is_running.store(false, .release);
-        self.cond.signal(self.io); // Wake up if paused so it can exit
-        if (self.thread) |t| {
-            t.join();
-            self.thread = null;
-        }
+        self.mutex.lockUncancelable(self.io);
+
+        self.is_running = false;
+        self.wake_requested = true;
+        self.cond.broadcast(self.io);
+        const handle = self.thread;
+        self.thread = null;
+        // DO NOT DEFER, IT DEADLOCKS
+        self.mutex.unlock(self.io);
+
+        if (handle) |t| t.join();
     }
 
     /// Resumes a switcher thread
@@ -101,20 +107,65 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.is_paused = true;
-        // No signal needed for pause, it just stops next time it loops
+        self.wake_requested = true;
     }
 
-    /// Helper function for changing thread states
-    fn threadHandler(self: *Self) bool {
+    /// Function that does the actual switching
+    fn switchEndpoint(self: *Self) void {
+        const len = self.endpoints.len(self.io);
+        if (len == 0) {
+            std.log.warn("switcher: endpoint list is empty, nothing to switch to", .{});
+            return;
+        }
+        const new_id = (self.current_id.load(.monotonic) + 1) % len;
+
+        if (self.endpoints.getCopy(self.io, new_id)) |server| {
+            self.current_id.store(new_id, .release);
+            std.log.info("Switched to ID: {d} address: {f}", .{ new_id, server });
+            // Reset packet state
+            self.packet_arrived.store(true, .monotonic);
+        } else {
+            std.log.warn("switcher: failed to get server endpoint!", .{});
+        }
+    }
+
+    /// Blocks while paused. Returns the current duration, or null if we should exit.
+    fn threadHandler(self: *Self) ?i64 {
         self.mutex.lockUncancelable(self.io);
-        // Mutex unlocks automatically when  helper function returns
         defer self.mutex.unlock(self.io);
 
-        while (self.is_paused and self.is_running.load(.acquire)) {
+        while (self.is_paused and self.is_running) {
             self.cond.waitUncancelable(self.io, &self.mutex);
         }
+        self.wake_requested = false; // don't leave a stale wake for the next waitFor
+        if (!self.is_running) return null;
+        return self.duration;
+    }
 
-        return self.is_running.load(.acquire);
+    /// Wait up to `duration`, waking early on any state change.
+    /// Returns false if the switcher should exit.
+    fn waitFor(self: *Self, duration: i64) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        // Create a duration struct
+        const dur: std.Io.Clock.Duration = .{ .raw = .fromSeconds(duration), .clock = .awake };
+        // Return error.Tiemout based on a duration struct
+        const timeout: std.Io.Timeout = .{ .deadline = .fromNow(self.io, dur) };
+
+        while (self.is_running and !self.wake_requested) {
+            self.cond.waitTimeout(self.io, &self.mutex, timeout) catch |err| switch (err) {
+                error.Timeout => break,
+                // For safety in case we switch to ther Io implementation
+                error.Canceled => {
+                    self.is_running = false;
+                    break;
+                },
+            };
+        }
+        // Reset wake_requested
+        self.wake_requested = false;
+        return self.is_running;
     }
 };
 
@@ -139,12 +190,12 @@ pub fn wgToServer(
             };
             std.log.debug("Trying to send to {f}", .{endpoint});
             if (std.Io.net.Socket.send(serv_sock, io, &endpoint, packet)) {
-                // Unwrap timer optional
-                if (switcher.is_running.load(.monotonic)) if (switcher.packet_arrived.load(.monotonic)) {
+                // Set a new timer only if packet came from the server and reset packet_arrived
+                if (switcher.packet_arrived.load(.monotonic)) {
                     // Reset timer to sync threads and set packet_arrived state
-                    switcher.timer.store(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds(), .monotonic);
+                    switcher.timer.store(nowSeconds(io), .monotonic);
                     switcher.packet_arrived.store(false, .monotonic);
-                };
+                }
             } else |err| {
                 std.log.err("Backend send failed to: {f} {s}", .{ endpoint, @errorName(err) });
             }
@@ -294,3 +345,8 @@ pub const SafeEndpointList = struct {
         self.list.deinit(gpa);
     }
 };
+
+/// Helper function returning monotonic seconds for measuring intervals.
+fn nowSeconds(io: std.Io) i64 {
+    return std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds();
+}
