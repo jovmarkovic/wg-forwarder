@@ -83,8 +83,7 @@ pub fn validate(cfg: Config) error{InvalidConfig}!void {
         if (sw.timer == null) {
             std.log.err("config: switcher.enabled is true but switcher.timer is missing", .{});
             bad = true;
-        }
-        if (sw.timer.? == 0) {
+        } else if (sw.timer.? == 0) {
             std.log.err("config: switcher.timer is 0 seconds", .{});
             bad = true;
         }

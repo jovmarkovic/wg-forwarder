@@ -520,9 +520,9 @@ fn endpointSet(
     };
 
     // Lock prior to doing anything
-    endpoints.lockSharedUncancelable(io);
+    endpoints.lockUncancelable(io);
     // Unlock on finish
-    defer endpoints.unlockShared(io);
+    defer endpoints.unlock(io);
 
     if (requested_id >= endpoints.lenUnsafe()) {
         reply(io, conn, "Error: ID out of bounds\n");
@@ -586,9 +586,9 @@ fn endpointAdd(
         };
 
         // Lock prior to doing anything
-        endpoints.lockSharedUncancelable(io);
+        endpoints.lockUncancelable(io);
         // Unlock on finish
-        defer endpoints.unlockShared(io);
+        defer endpoints.unlock(io);
 
         // Using current len and adding an item to array creates a valid ID
         const id = endpoints.len(io);
@@ -629,9 +629,9 @@ fn endpointRemove(
     };
 
     // Lock prior to doing anything
-    endpoints.lockSharedUncancelable(io);
+    endpoints.lockUncancelable(io);
     // Unlock on finish
-    defer endpoints.unlockShared(io);
+    defer endpoints.unlock(io);
 
     // Already locked, use tiems.len directly
     const list_len = endpoints.list.items.len;
@@ -653,29 +653,30 @@ fn endpointRemove(
             _ = endpoints.popUnsafe();
         } else {
             _ = endpoints.orderedRemoveUnsafe(id);
-            // CRITICAL: If removed an ID lower than our current_id,
-            // decrement current_id to keep pointing at the same server.
-            var current = current_id.load(.acquire);
-            while (true) {
-                var new = current;
-                if (id < current) {
-                    new = current - 1;
-                } else if (id == current) {
-                    new = if (id > 0) id - 1 else 0;
-                } else {
-                    // If id > current, current_id doesn't need to change
-                    break;
-                }
+        }
 
-                // Attempt to update. If current changed in another thread,
-                // cmpxchgWeak updates 'current' and returns an error, looping again.
-                current = current_id.cmpxchgWeak(
-                    current,
-                    new,
-                    .release,
-                    .acquire,
-                ) orelse break;
+        // CRITICAL: If removed an ID lower than our current_id,
+        // decrement current_id to keep pointing at the same server.
+        var current = current_id.load(.acquire);
+        while (true) {
+            var new = current;
+            if (id < current) {
+                new = current - 1;
+            } else if (id == current) {
+                new = if (id > 0) id - 1 else 0;
+            } else {
+                // If id > current, current_id doesn't need to change
+                break;
             }
+
+            // Attempt to update. If current changed in another thread,
+            // cmpxchgWeak updates 'current' and returns an error, looping again.
+            current = current_id.cmpxchgWeak(
+                current,
+                new,
+                .release,
+                .acquire,
+            ) orelse break;
         }
         std.log.info("Admin removed ID: {d} address: {f}", .{ id, addr });
     } else |err| std.log.warn(

@@ -13,7 +13,7 @@ pub const SwitcherState = struct {
     cond: std.Io.Condition = .init,
 
     // Controls; manipulated by mutex
-    is_running: bool,
+    is_running: bool = false,
     is_paused: bool = false,
     wake_requested: bool = false,
 
@@ -265,6 +265,15 @@ pub const SafeEndpointList = struct {
     const Self = @This();
     lock: std.Io.RwLock = .init,
     list: std.ArrayList(std.Io.net.IpAddress) = .empty,
+
+    /// Use exclusive lock for writing
+    pub fn lockUncancelable(self: *Self, io: std.Io) void {
+        self.lock.lockUncancelable(io);
+    }
+    /// Use exclusive unlock for writing
+    pub fn unlock(self: *Self, io: std.Io) void {
+        self.lock.unlock(io);
+    }
 
     pub fn lockSharedUncancelable(self: *Self, io: std.Io) void {
         self.lock.lockSharedUncancelable(io);
