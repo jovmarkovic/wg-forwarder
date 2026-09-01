@@ -1,9 +1,12 @@
 const std = @import("std");
-const cfg = @import("parser.zig");
 const builtin = @import("builtin");
-const timestamp = @import("timestamp.zig");
-const lib = @import("root.zig");
+const parser = @import("parser.zig");
 const server = @import("server.zig");
+const timestamp = @import("timestamp.zig");
+const EndpointPool = @import("endpoints.zig").EndpointPool;
+const SwitcherState = @import("switcher.zig").SwitcherState;
+const serverToWg = @import("forward.zig").serverToWg;
+const wgToServer = @import("forward.zig").wgToServer;
 
 // Comptime logging level set to debug
 pub const std_options: std.Options = .{
@@ -48,13 +51,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var dbga: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = dbga.deinit();
 
-    const allocator = switch (builtin.mode) {
+    const alloc = switch (builtin.mode) {
         .Debug => dbga.allocator(),
         else => std.heap.smp_allocator,
     };
 
-    const args = try init.args.toSlice(allocator);
-    defer allocator.free(args);
+    const args = try init.args.toSlice(alloc);
+    defer alloc.free(args);
 
     var io_init: std.Io.Threaded = .init_single_threaded;
     defer io_init.deinit();
@@ -70,10 +73,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const path = args[2];
-    const reader = try cfg.readFile(io, allocator, path);
-    defer reader.deinit(allocator);
+    const reader = try parser.readFile(io, alloc, path);
+    defer reader.deinit(alloc);
     const config = reader.config();
-    try cfg.validate(config.*);
+    try parser.validate(config);
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -84,17 +87,53 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.info("Using default log level: {s}", .{@tagName(runtime_level)});
     }
 
+    // Format read endpoints
+    var endpoints: EndpointPool = .{ .addr_family = config.address_family };
+    defer endpoints.deinit(alloc);
+
+    var bad_addr = false;
+    for (config.switcher.endpoints, 0..) |ep, idx| {
+        const addr = parser.parseHostPort(ep) catch |err| {
+            std.log.err("config: switcher.endpoints[{d}] = \"{s}\": {s}", .{
+                idx, ep, @errorName(err),
+            });
+            bad_addr = true;
+            continue;
+        };
+        const id = endpoints.add(io, alloc, addr) catch |err| switch (err) {
+            error.WrongFamily => {
+                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {s}", .{
+                    idx, ep, @tagName(config.address_family),
+                });
+                bad_addr = true;
+                continue;
+            },
+            error.Duplicate => {
+                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {s}", .{
+                    idx, ep, @tagName(config.address_family),
+                });
+                bad_addr = true;
+                continue;
+            },
+            else => return err,
+        };
+        if (idx == config.switcher.id) _ = endpoints.setCurrent(io, id, addr);
+    }
+    if (bad_addr) return error.InvalidConfig;
+
     // WireGuard -> Forwarder
     const wg_listen_addr = try std.Io.net.IpAddress.parse(
         config.client_endpoint.address,
         config.client_endpoint.port,
     );
+    _ = try EndpointPool.requireFamily(wg_listen_addr, config.address_family);
 
     // Forwarder
     const fw_listen_addr = try std.Io.net.IpAddress.parse(
         config.forwarder_socket.address,
         config.forwarder_socket.port,
     );
+    _ = try EndpointPool.requireFamily(fw_listen_addr, config.address_family);
 
     // Listen for WireGuard (client) packets
     var wg_sock = try std.Io.net.IpAddress.bind(&fw_listen_addr, io, .{
@@ -104,40 +143,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Endpoint -> Forwarder
     const endpoint_listen_addr = try std.Io.net.IpAddress.parse(
-        config.server_socket.address,
+        config.server_socket.address orelse parser.anyAddress(config.address_family),
         config.server_socket.port,
     );
+    _ = try EndpointPool.requireFamily(endpoint_listen_addr, config.address_family);
+
     // Listen for Endpoint packets
     var endpoint_sock = try std.Io.net.IpAddress.bind(&endpoint_listen_addr, io, .{
         .mode = .dgram,
         .protocol = .udp,
     });
 
-    // Format read endpoints
-    var endpoints: lib.SafeEndpointList = .{};
-    defer endpoints.deinit(allocator);
-    for (config.switcher.endpoints) |s| {
-        var split: std.ArrayList([]const u8) = .empty;
-        defer split.deinit(allocator);
-        var iter = std.mem.splitScalar(u8, s, ':');
-        while (iter.next()) |part| {
-            try split.append(allocator, part);
-        }
-        const ip = split.items[0];
-        const port = try std.fmt.parseInt(u16, split.items[1], 10);
-        const addr = try std.Io.net.IpAddress.parse(ip, port);
-        try endpoints.add(io, allocator, addr);
-    }
-
-    // Set default server ID
-    var current_id: std.atomic.Value(usize) = .init(config.switcher.id);
-
     // Siwtcher struct holds all atomics
-    var switcher: lib.SwitcherState = .{
+    var switcher: SwitcherState = .{
         .io = io,
-        .duration = if (config.switcher.timer) |t| t else null,
+        .idle_timeout = if (config.switcher.timer) |t| t else null,
         .endpoints = &endpoints,
-        .current_id = &current_id,
     };
     // Deffering stop to run after joining other threads
     defer switcher.stop();
@@ -147,11 +168,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.info("Spawning admin server thread....", .{});
         admin_server = try std.Thread.spawn(.{}, server.adminServer, .{
             io,
-            allocator,
-            config.admin_console.address,
+            alloc,
+            config.admin_console.address orelse parser.loopback(config.address_family),
             config.admin_console.port,
             &endpoints,
-            &current_id,
             &switcher,
         });
     }
@@ -162,18 +182,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.info("Switching disabled, using endpoint derived form ID....", .{});
     }
     std.log.info("Spawning client listener....", .{});
-    const client_thread = try std.Thread.spawn(.{}, lib.wgToServer, .{
+    const client_thread = try std.Thread.spawn(.{}, wgToServer, .{
         io,
         &switcher,
         &wg_sock,
         &endpoint_sock,
         &source_buffer,
         &endpoints,
-        &current_id,
     });
 
     std.log.info("Spawning server listener....", .{});
-    const endpoint_thread = try std.Thread.spawn(.{}, lib.serverToWg, .{
+    const endpoint_thread = try std.Thread.spawn(.{}, serverToWg, .{
         io,
         wg_listen_addr,
         &switcher,
@@ -181,7 +200,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         &endpoint_sock,
         &endpoint_buffer,
         &endpoints,
-        &current_id,
     });
 
     // Thread joining

@@ -35,7 +35,7 @@ pub fn build(b: *std.Build) void {
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/timestamp.zig"),
+        .root_source_file = b.path("src/root.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
@@ -57,8 +57,15 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+    const builtin = @import("builtin");
+    const bin_name = b.fmt("wg_forwarder-{s}-{s}-{s}-{s}", .{
+        @tagName(target.result.os.tag),
+        @tagName(target.result.cpu.arch),
+        @tagName(optimize),
+        builtin.zig_version_string,
+    });
     const exe = b.addExecutable(.{
-        .name = "wg_forwarder",
+        .name = bin_name,
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of

@@ -22,6 +22,7 @@ Example:
 ```
 {
   "log_level": "info",
+  "address_family": "ip4",
   "client_endpoint": {
     "address": "127.0.0.1",
     "port": 51821
@@ -55,11 +56,13 @@ Example:
 - server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0", port: 0
 - timer can be omitted if the switcher is set to false. Otherwise it would panic 
 - log_level can be omitted, it will use Zig's default log level in that case.
+- address_family can be ommited, default is ip4.
 - id is used to set an initial server endpoint. 
 - admin_console structure can be omitted, Defaults for it are: enabled: false, address: "127.0.0.1", port: "9000"
 
 ## Explanation
 - log_level: Runtime logging level of the service.
+- address_family: Runtime network family version of the service.
 - client_endpoint: Endpoint of the wireguard client that wants to send packets to a server.
 - forwarder_socket: Socket that accepts packets from client_endpoint. 
 
@@ -78,7 +81,9 @@ Example:
 ## Configuration types
 - log_level: err, warn, info, debug
 
-- address: IPv4
+- address_family: union(enum) ip4, ip6
+
+- address: IPv4, IPv6
 
 - port: u16
 
@@ -88,7 +93,7 @@ Example:
 
 - enabled: bool
 
-- endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
+- endpoints: [ "IPv4/[IPv6]:port", "IPv4/[IPv6]:port", ... ,"IPv4/[IPv6]:port" ]
 
 
 ## Admin server options
@@ -106,24 +111,25 @@ Available Global Commands:
   exit/quit (q)   - Close the admin connection
 
 Available Endpoint Commands:
-  help (?)        - Show this message
-  list            - List all available endpoints
-  add ip:port     - Adds one or more endpoints
-                      Use 'ip:port ip:port' with out qotes to add multiple
-  remove (rm) <n> - Remove endpoint by ID
-  set <n>         - Manually set the active endpoint ID
-  find ip:port    - Find ID from the address 
-  status (info)   - Show switcher status and current server info
-  switcher        - Interactively manage switcher 
-  return (ret)    - Return to global session state
-  exit/quit (q)   - Close the admin connection
+  help (?)           - Show this message
+  list               - List all available endpoints
+  add ip:port        - Adds one or more endpoints
+                         Use 'ip:port ip:port' with out qotes to add multiple
+  find ip:port       - Find endpoint status from the address 
+  edit <n> <ip:port> - Edit an endpoint address, slot optional to pass
+  set <n> <ip:port>  - Manually set the active endpoint by address, slot optional to pass
+  rm <n> <ip:port>   - Remove endpoint by address, slot optional to pass
+  status (info)      - Show switcher status and current server info
+  switcher           - Interactively manage switcher 
+  return (ret)       - Return to global session state
+  exit/quit (q)      - Close the admin connection
 
 Available Switcher Commands:
   help (?)        - Show this message
   status (info)   - Show switcher status and current server info
   play            - Resume/start the switcher thread
   pause           - Suspend the switcher thread
-  kill            - Completely stop the switcher thread
+  stop            - Fully stop the switcher thread
   timer           - Set timer duration for siwtcher thread
   endpoint        - Interactively manage endpoint
   return (ret)    - Return to global session state
