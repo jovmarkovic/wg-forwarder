@@ -74,8 +74,8 @@ pub const SwitcherState = struct {
                 const fo = self.endpoints.failoverToNext(self.io, now);
                 if (fo.selected) |e| {
                     if (fo.changed) {
-                        std.log.info("Switched to {d} address: {f} health: {s}", .{
-                            e.index, e.endpoint.addr, @tagName(e.endpoint.health),
+                        std.log.info("Switched to {d} address: {f} health: {t}", .{
+                            e.index, e.endpoint.addr, e.endpoint.health,
                         });
                     } else {
                         std.log.warn(
