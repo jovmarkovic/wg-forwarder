@@ -137,8 +137,8 @@ pub const EndpointPool = struct {
                 if (std.Io.net.IpAddress.eql(&e.addr, &addr)) {
                     if (w.unusedCapacityLen() < max_line) return @intCast(index);
                     w.print(
-                        "Found address: {f} at slot: {d} health: {s}\n",
-                        .{ e.addr, @as(u32, @intCast(index)), @tagName(e.health) },
+                        "Found address: {f} at slot: {d} health: {t}\n",
+                        .{ e.addr, @as(u32, @intCast(index)), e.health },
                     ) catch return @intCast(index);
                 };
         }
@@ -158,8 +158,8 @@ pub const EndpointPool = struct {
             if (slot.endpoint) |e| {
                 if (w.unusedCapacityLen() < max_line) return @intCast(index);
                 w.print(
-                    "Address: {f} slot: {d} health: {s}\n",
-                    .{ e.addr, @as(u32, @intCast(index)), @tagName(e.health) },
+                    "Address: {f} slot: {d} health: {t}\n",
+                    .{ e.addr, @as(u32, @intCast(index)), e.health },
                 ) catch return @intCast(index);
             }
         }
