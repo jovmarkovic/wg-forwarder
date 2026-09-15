@@ -25,7 +25,7 @@ pub fn wgToServer(
             if (std.Io.net.Socket.send(serv_sock, io, &endpoint, packet)) {
                 switcher.last_send_at.store(nowSeconds(io), .monotonic);
             } else |err| {
-                std.log.err("Backend send failed to: {f} {s}", .{ endpoint, @errorName(err) });
+                std.log.err("Backend send failed to: {f} {t}", .{ endpoint, err });
             }
         } else |err| {
             return err;
@@ -63,7 +63,7 @@ pub fn serverToWg(
                 // Confirm packet came from the server
                 switcher.last_reply_at.store(nowSeconds(io), .monotonic);
             } else |err| {
-                std.log.err("Backend send failed to: {f} {s}", .{ wg_addr, @errorName(err) });
+                std.log.err("Backend send failed to: {f} {t}", .{ wg_addr, err });
             }
         } else |err| {
             return err;

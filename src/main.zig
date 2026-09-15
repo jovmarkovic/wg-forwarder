@@ -23,7 +23,7 @@ fn logFn(
     args: anytype,
 ) void {
     // Custom check for changing runtime logging
-    if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
+    if (@backingInt(level) > @backingInt(runtime_level)) return;
 
     // Copy-pasted implemetntion of defaultLog() from std.log
     const io = std.Options.debug_io;
@@ -59,7 +59,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const args = try init.args.toSlice(alloc);
     defer alloc.free(args);
 
-    var io_init: std.Io.Threaded = .init_single_threaded;
+    // Sets the max number of active admin threads
+    var io_init: std.Io.Threaded = .init(alloc, .{ .concurrent_limit = .limited(4) });
     defer io_init.deinit();
 
     const io = io_init.io();
@@ -84,7 +85,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.err("Tried to set log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
         return error.UnknownLogLevel;
     } else {
-        std.log.info("Using default log level: {s}", .{@tagName(runtime_level)});
+        std.log.info("Using default log level: {t}", .{runtime_level});
     }
 
     // Format read endpoints

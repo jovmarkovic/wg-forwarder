@@ -21,47 +21,19 @@ pub fn adminServer(
         .reuse_address = true,
     });
 
+    var sessions: std.Io.Group = .init;
+    defer sessions.cancel(io);
     while (true) {
-        // Reset state for every new session
-        var ctx: Context = .global;
         // Wait for an admin to connect (e.g., via nc or telnet )
         var conn = try server.accept(io);
         std.log.info("Admin connected from: {f}", .{conn.socket.address});
-        defer {
-            conn.socket.close(io);
-            std.log.info("Admin session ended for: {f}", .{conn.socket.address});
-        }
-
-        const welcome = "WG-Forwarder Admin Console\nType in help or ? for more information.\n> ";
-        try conn.socket.send(io, &conn.socket.address, welcome);
-
-        var buf: [2048]u8 = undefined;
-        // Session loop
-        while (true) {
-            if (conn.socket.receive(io, &buf)) |recv| {
-                processInput(
-                    io,
-                    gpa,
-                    conn,
-                    recv.data,
-                    &ctx,
-                    endpoints,
-                    switcher,
-                ) catch |err| switch (err) {
-                    error.Exit => {
-                        // Convert error.Exit to graceful shutdown of the session
-                        conn.socket.send(io, &conn.socket.address, "Bye!\n") catch {};
-                        break;
-                    },
-                };
-            } else |err| switch (err) {
-                // Ignore these types of errors, they are handled by reply() in processInput()
-                error.ConnectionResetByPeer, error.Canceled => {
-                    break;
-                },
-                else => return err,
-            }
-        }
+        sessions.concurrent(io, session, .{ io, gpa, conn, endpoints, switcher }) catch |err| switch (err) {
+            error.ConcurrencyUnavailable => {
+                // at concurrent_limit — refuse politely rather than queueing
+                conn.socket.send(io, &conn.socket.address, "Too many sessions.\n") catch {};
+                conn.socket.close(io);
+            },
+        };
     }
 }
 
@@ -124,6 +96,49 @@ const SwitcherCmd = enum {
 };
 
 // session plumbing
+fn session(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    conn: std.Io.net.Stream,
+    endpoints: *EndpointPool,
+    switcher: *SwitcherState,
+) void {
+    // Close the socket on a session end
+    defer {
+        conn.socket.close(io);
+        std.log.info("Admin disconnected from: {f}", .{conn.socket.address});
+    }
+
+    // Reset state for every new session
+    var ctx: Context = .global;
+
+    const welcome = "WG-Forwarder Admin Console\nType in help or ? for more information.\n> ";
+    reply(io, conn, welcome);
+
+    var buf: [2048]u8 = undefined;
+    // Session loop
+    while (conn.socket.receive(io, &buf)) |recv| {
+        if (recv.data.len == 0) break; // orderly close: TCP EOF is a 0-byte read
+        processInput(
+            io,
+            gpa,
+            conn,
+            recv.data,
+            &ctx,
+            endpoints,
+            switcher,
+        ) catch |err| switch (err) {
+            error.Exit => {
+                reply(io, conn, "Bye!\n");
+                break;
+            },
+        };
+    } else |err| switch (err) {
+        // Expected ways for a session to end;
+        error.ConnectionResetByPeer, error.Canceled => {},
+        else => std.log.err("admin session failed: {t}", .{err}),
+    }
+}
 
 /// Process admin_console input
 fn processInput(
@@ -178,7 +193,7 @@ fn processInput(
 /// Helper for catching errors on reply
 fn reply(io: std.Io, conn: std.Io.net.Stream, msg: []const u8) void {
     conn.socket.send(io, &conn.socket.address, msg) catch |err| {
-        std.log.warn("Admin reply failed: {s}", .{@errorName(err)});
+        std.log.warn("Admin reply failed: {t}", .{err});
     };
 }
 
@@ -427,8 +442,8 @@ fn showStatus(
     const msg = if (entry) |e|
         std.fmt.bufPrint(
             msg_buf,
-            "Switcher: {s} timer: {d}s\nCurrent slot: {d} address: {f} health: {s}\n",
-            .{ state_str, timer, e.index, e.endpoint.addr, @tagName(e.endpoint.health) },
+            "Switcher: {s} timer: {d}s\nCurrent slot: {d} address: {f} health: {t}\n",
+            .{ state_str, timer, e.index, e.endpoint.addr, e.endpoint.health },
         ) catch "Status line too long for the reply buffer.\n"
     else
         std.fmt.bufPrint(
@@ -574,8 +589,8 @@ fn endpointEdit(
         reply(io, conn, msg);
         return;
     };
-    const msg = std.fmt.bufPrint(msg_buf, "Changed {f} to {f} (was health: {s}).\n", .{
-        target.addrs[0], target.addrs[1], @tagName(old.health),
+    const msg = std.fmt.bufPrint(msg_buf, "Changed {f} to {f} (was health: {t}).\n", .{
+        target.addrs[0], target.addrs[1], old.health,
     }) catch "Endpoint changed.\n";
     reply(io, conn, msg);
     std.log.info("Admin edited endpoint:\n  old:{f}\n  new:{f}", .{ target.addrs[0], target.addrs[1] });
@@ -669,7 +684,7 @@ fn switcherPlay(
             error.NoTimerConfigured => "Error: no timer configured. Use 'timer <seconds>' first.\n",
             else => blk: {
                 // Log only system error
-                std.log.err("switcher start failed: {s}.", .{@errorName(err)});
+                std.log.err("switcher start failed: {t}.", .{err});
                 break :blk
                 // Send more complete error message in a reply if buffer allows it
                 std.fmt.bufPrint(
