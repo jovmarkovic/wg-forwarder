@@ -2,6 +2,9 @@ const std = @import("std");
 const cfg = @import("parser.zig");
 const builtin = @import("builtin");
 const timestamp = @import("timestamp.zig");
+const switcher = @import("switcher.zig").switcher;
+const wgToServer = @import("forward.zig").wgToServer;
+const serverToWg = @import("forward.zig").serverToWg;
 
 // Comptime logging level set to debug
 pub const std_options: std.Options = .{
@@ -35,123 +38,6 @@ fn logFn(
     }
     // Same return that std.log.defaultLog() does
     return std.log.defaultLogFileTerminal(level, scope, format, args, stderr) catch {};
-}
-
-fn switcher(
-    io: std.Io,
-    seconds: isize,
-    timer: *?std.atomic.Value(i64),
-    servers: []std.Io.net.IpAddress,
-    current_id: *std.atomic.Value(usize),
-    packet_arrived: *std.atomic.Value(bool),
-) !void {
-    // Unwrap timer  optional
-    if (timer.*) |*t| {
-        // Declare constants once before the main loop
-        const duration = seconds;
-
-        while (true) {
-            const now = std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds();
-            const elapsed = now - t.load(.monotonic);
-            std.log.debug("Timer time elapsed: {d}", .{elapsed});
-            std.log.debug("Timer time duration: {d}", .{duration});
-            std.log.debug("Timer packet_arrived state: {}", .{packet_arrived.load(.monotonic)});
-
-            // Main check is if packet has arrived
-            if (!packet_arrived.load(.monotonic)) {
-                // Second check is if enough time has passsed before switching
-                if (elapsed < duration) {
-                    try io.sleep(.fromSeconds(duration - elapsed), .awake);
-                    continue;
-                }
-                const new_id = (current_id.load(.monotonic) + 1) % servers.len;
-                current_id.store(new_id, .release);
-                std.log.info("Switched servers endpoints!", .{});
-                std.log.info("Current endpoint: {f}", .{&servers[current_id.load(.monotonic)]});
-                // Reset packet state
-                packet_arrived.store(true, .monotonic);
-            }
-            // Reset time to sync threads
-            t.store(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds(), .monotonic);
-            try io.sleep(.fromSeconds(duration), .awake);
-        }
-    } else {
-        std.log.err("Switcher got called but timer variable value is: {any}", .{timer});
-        return error.FailedToUnwrap;
-    }
-}
-fn wgToServer(
-    timer: *?std.atomic.Value(i64),
-    packet_arrived: *std.atomic.Value(bool),
-    io: std.Io,
-    wg_sock: *std.Io.net.Socket,
-    serv_sock: *std.Io.net.Socket,
-    buf: []u8,
-    servers: []std.Io.net.IpAddress,
-    current_id: *std.atomic.Value(usize),
-) !void {
-    while (true) {
-
-        // --- Handle WireGuard -> server ---
-        if (std.Io.net.Socket.receive(wg_sock, io, buf[0..])) |recv| {
-            std.log.debug("Received {d} bytes from WireGuard", .{recv.data.len});
-            const packet = buf[0..recv.data.len];
-            std.log.debug("Trying to send to {f}", .{&servers[current_id.load(.monotonic)]});
-            if (std.Io.net.Socket.send(serv_sock, io, &servers[current_id.load(.acquire)], packet)) {
-                // Unwrap timer optional
-                if (timer.*) |*t| if (packet_arrived.load(.monotonic)) {
-                    // Reset timer to sync threads and set packet_arrived state
-                    t.store(std.Io.Clock.Timestamp.now(io, .awake).raw.toSeconds(), .monotonic);
-                    packet_arrived.store(false, .monotonic);
-                };
-            } else |err| {
-                std.log.err(
-                    "Backend {f} failed: {t}",
-                    .{ servers[current_id.load(.acquire)], err },
-                );
-            }
-        } else |err| {
-            return err;
-        }
-    }
-}
-fn serverToWg(
-    packet_arrived: *std.atomic.Value(bool),
-    io: std.Io,
-    wg_sock: *std.Io.net.Socket,
-    serv_sock: *std.Io.net.Socket,
-    srv_buf: []u8,
-    servers: []std.Io.net.IpAddress,
-    current_id: *std.atomic.Value(usize),
-    wg_addr: std.Io.net.IpAddress,
-) !void {
-    while (true) {
-
-        // --- Handle server -> WireGuard ---
-        if (std.Io.net.Socket.receive(serv_sock, io, srv_buf[0..])) |recv| {
-            const addr = recv.from;
-            std.log.debug("Received {d} bytes, server: {f}", .{ recv.data.len, addr });
-            const packet = srv_buf[0..recv.data.len];
-            const server = servers[current_id.load(.acquire)];
-            if (!std.Io.net.IpAddress.eql(&addr, &server)) {
-                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, server });
-                // If Received packet comes before sending packet is out at startup, set the correct state and discard it
-                packet_arrived.store(false, .monotonic);
-                continue;
-            }
-            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) {
-                // Confirm packet came from the server
-                packet_arrived.store(true, .monotonic);
-            } else |err| {
-                std.log.err(
-                    "Backend {f} failed: {t}",
-                    .{ wg_addr, err },
-                );
-            }
-        } else |err| {
-            return err;
-        }
-    }
 }
 
 // Source_buffer holds data from cleint
