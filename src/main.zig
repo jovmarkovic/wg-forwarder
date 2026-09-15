@@ -96,23 +96,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var bad_addr = false;
     for (config.switcher.endpoints, 0..) |ep, idx| {
         const addr = parser.parseHostPort(ep) catch |err| {
-            std.log.err("config: switcher.endpoints[{d}] = \"{s}\": {s}", .{
-                idx, ep, @errorName(err),
-            });
+            std.log.err("config: switcher.endpoints[{d}] = \"{s}\": {t}", .{ idx, ep, err });
             bad_addr = true;
             continue;
         };
         const id = endpoints.add(io, alloc, addr) catch |err| switch (err) {
             error.WrongFamily => {
-                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {s}", .{
-                    idx, ep, @tagName(config.address_family),
+                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {t}", .{
+                    idx, ep, config.address_family,
                 });
                 bad_addr = true;
                 continue;
             },
             error.Duplicate => {
-                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {s}", .{
-                    idx, ep, @tagName(config.address_family),
+                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {t}", .{
+                    idx, ep, config.address_family,
                 });
                 bad_addr = true;
                 continue;
