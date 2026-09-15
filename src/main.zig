@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer alloc.free(args);
 
     // Sets the max number of active admin threads
-    var io_init: std.Io.Threaded = .init(alloc, .{ .concurrent_limit = .untried });
+    var io_init: std.Io.Threaded = .init(alloc, .{});
     defer io_init.deinit();
 
     const io = io_init.io();
@@ -78,6 +78,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer reader.deinit(alloc);
     const config = reader.config();
     try parser.validate(config);
+    std.debug.print("{}\n", .{config});
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -170,6 +171,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         admin_server = try std.Thread.spawn(.{}, server.adminServer, .{
             io,
             alloc,
+            config.admin_console.max_sessions,
             config.admin_console.address orelse parser.loopback(config.address_family),
             config.admin_console.port,
             &endpoints,

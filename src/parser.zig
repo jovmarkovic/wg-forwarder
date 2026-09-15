@@ -91,9 +91,10 @@ pub fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Reader {
 
 // Define different config problems as an enum
 pub const Problem = enum {
-    missing_timer,
     zero_timer,
+    missing_timer,
     id_out_of_range,
+    zero_max_sessions,
     empty_pool_no_console,
 };
 
@@ -104,6 +105,7 @@ pub const Problems = std.EnumSet(Problem);
 /// It can be tested exhaustively and the caller decides how to report.
 pub fn check(cfg: Config) Problems {
     var found: Problems = .empty;
+    const adm = cfg.admin_console;
     const sw = cfg.switcher;
     const pool_len = sw.endpoints.len;
 
@@ -115,7 +117,8 @@ pub fn check(cfg: Config) Problems {
         }
         if (sw.id >= pool_len and pool_len != 0) found.insert(.id_out_of_range);
     }
-    if (pool_len == 0 and !cfg.admin_console.enabled) found.insert(.empty_pool_no_console);
+    if (pool_len == 0 and !adm.enabled) found.insert(.empty_pool_no_console);
+    if (adm.enabled and adm.max_sessions == 0) found.insert(.zero_max_sessions);
 
     return found;
 }
@@ -125,14 +128,16 @@ pub fn check(cfg: Config) Problems {
 pub fn validate(cfg: Config) error{InvalidConfig}!void {
     const found = check(cfg);
 
-    if (found.contains(.missing_timer))
-        std.log.err("config: switcher.enabled is true but switcher.timer is missing", .{});
     if (found.contains(.zero_timer))
         std.log.err("config: switcher.timer is 0 seconds", .{});
+    if (found.contains(.missing_timer))
+        std.log.err("config: switcher.enabled is true but switcher.timer is missing", .{});
     if (found.contains(.id_out_of_range))
         std.log.err("config: switcher.id is {d} but only {d} endpoints are defined", .{
             cfg.switcher.id, cfg.switcher.endpoints.len,
         });
+    if (found.contains(.zero_max_sessions))
+        std.log.err("config: admin_console is enabled but max_sessions is set to 0", .{});
     if (found.contains(.empty_pool_no_console))
         std.log.err("config: switcher endpoints are empty and admin_console is disabled", .{});
 
@@ -182,6 +187,7 @@ fn testConfig(sw: Config.Switcher, adm: Config.Admin) Config {
 
 const two_endpoints: []const []const u8 = &.{ "1.2.3.4:5000", "1.2.3.5:5000" };
 const no_endpoints: []const []const u8 = &.{};
+const valid_sw: Config.Switcher = .{ .enabled = true, .endpoints = two_endpoints, .id = 0, .timer = 19 };
 const admin_on: Config.Admin = .{ .enabled = true, .port = 9000 };
 const admin_off: Config.Admin = .{ .enabled = false, .port = 9000 };
 
@@ -246,6 +252,18 @@ test "endpoint: set active index-out-of-bounds" {
         .{ .enabled = true, .id = 1, .timer = 30, .endpoints = two_endpoints },
         admin_on,
     ), &.{});
+}
+
+test "endpoint: max_sessions when admin_console is true" {
+    try expectProblems(testConfig(
+        valid_sw,
+        .{ .enabled = false, .max_sessions = 0 },
+    ), &.{});
+    // With the console enabled, max_sessions cannot be 0.
+    try expectProblems(testConfig(
+        valid_sw,
+        .{ .enabled = true, .max_sessions = 0 },
+    ), &.{.zero_max_sessions});
 }
 
 test "endpoint: empty pool when admin_console is false" {

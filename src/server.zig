@@ -38,7 +38,7 @@ pub fn adminServer(
         _ = session_count.fetchAdd(1, .monotonic);
 
         std.log.info("Admin connected from: {f}", .{conn.socket.address});
-        sessions.concurrent(io, session, .{ io, gpa, session_count, conn, endpoints, switcher }) catch |err| switch (err) {
+        sessions.concurrent(io, session, .{ io, gpa, &session_count, conn, endpoints, switcher }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => {
                 // at concurrent_limit — refuse politely rather than queueing
                 reply(io, conn, limit_msg);
@@ -111,7 +111,7 @@ const SwitcherCmd = enum {
 fn session(
     io: std.Io,
     gpa: std.mem.Allocator,
-    session_count: std.atomic.Value(u32),
+    session_count: *std.atomic.Value(u32),
     conn: std.Io.net.Stream,
     endpoints: *EndpointPool,
     switcher: *SwitcherState,
