@@ -46,6 +46,7 @@ Example:
   }
   "admin_console": {
     "enabled": false,
+    "max_sessions": 1,
     "address": 127.0.0.1,
     "port": 9000,
   }
@@ -58,7 +59,9 @@ Example:
 - log_level can be omitted, it will use Zig's default log level in that case.
 - address_family can be ommited, default is ip4.
 - id is used to set an initial server endpoint. 
-- admin_console structure can be omitted, Defaults for it are: enabled: false, address: "127.0.0.1", port: "9000"
+- admin_console structure can be omitted. 
+
+  Defaults for it are: enabled: false, max_sessions: 1, address: "127.0.0.1", port: "9000"
 
 ## Explanation
 - log_level: Runtime logging level of the service.
@@ -95,6 +98,7 @@ Example:
 
 - endpoints: [ "IPv4/[IPv6]:port", "IPv4/[IPv6]:port", ... ,"IPv4/[IPv6]:port" ]
 
+- max_sessions: u32
 
 ## Admin server options
 Admin server has three states, global, endpoint and switcher.

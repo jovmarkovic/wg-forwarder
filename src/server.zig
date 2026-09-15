@@ -9,29 +9,41 @@ const SwitcherState = @import("switcher.zig").SwitcherState;
 pub fn adminServer(
     io: std.Io,
     gpa: std.mem.Allocator,
+    max_sessions: u32,
     ip: []const u8,
     port: u16,
     endpoints: *EndpointPool,
     switcher: *SwitcherState,
 ) !void {
+    const limit_msg = "Too many sessions.\n";
     const addr = try std.Io.net.IpAddress.parse(ip, port);
     _ = try EndpointPool.requireFamily(addr, endpoints.addr_family);
     var server = try std.Io.net.IpAddress.listen(&addr, io, .{
         .mode = .stream,
         .reuse_address = true,
     });
+    var session_count: std.atomic.Value(u32) = .init(0);
 
     var sessions: std.Io.Group = .init;
     defer sessions.cancel(io);
     while (true) {
         // Wait for an admin to connect (e.g., via nc or telnet )
         var conn = try server.accept(io);
+        // Comply with max_sessions
+        if (session_count.load(.monotonic) >= max_sessions) {
+            reply(io, conn, limit_msg);
+            conn.socket.close(io);
+            continue;
+        }
+        _ = session_count.fetchAdd(1, .monotonic);
+
         std.log.info("Admin connected from: {f}", .{conn.socket.address});
-        sessions.concurrent(io, session, .{ io, gpa, conn, endpoints, switcher }) catch |err| switch (err) {
+        sessions.concurrent(io, session, .{ io, gpa, session_count, conn, endpoints, switcher }) catch |err| switch (err) {
             error.ConcurrencyUnavailable => {
                 // at concurrent_limit — refuse politely rather than queueing
-                conn.socket.send(io, &conn.socket.address, "Too many sessions.\n") catch {};
+                reply(io, conn, limit_msg);
                 conn.socket.close(io);
+                _ = session_count.fetchSub(1, .monotonic);
             },
         };
     }
@@ -99,6 +111,7 @@ const SwitcherCmd = enum {
 fn session(
     io: std.Io,
     gpa: std.mem.Allocator,
+    session_count: std.atomic.Value(u32),
     conn: std.Io.net.Stream,
     endpoints: *EndpointPool,
     switcher: *SwitcherState,
@@ -106,6 +119,7 @@ fn session(
     // Close the socket on a session end
     defer {
         conn.socket.close(io);
+        _ = session_count.fetchSub(1, .monotonic);
         std.log.info("Admin disconnected from: {f}", .{conn.socket.address});
     }
 

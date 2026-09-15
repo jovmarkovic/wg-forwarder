@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer alloc.free(args);
 
     // Sets the max number of active admin threads
-    var io_init: std.Io.Threaded = .init(alloc, .{ .concurrent_limit = .limited(4) });
+    var io_init: std.Io.Threaded = .init(alloc, .{ .concurrent_limit = .untried });
     defer io_init.deinit();
 
     const io = io_init.io();

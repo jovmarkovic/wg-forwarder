@@ -43,6 +43,7 @@ const Config = struct {
     };
     const Admin = struct {
         enabled: bool = false,
+        max_sessions: u32 = 1,
         address: ?[]const u8 = null,
         port: u16 = 9000,
     };
