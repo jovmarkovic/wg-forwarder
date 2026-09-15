@@ -18,7 +18,7 @@ fn logFn(
     args: anytype,
 ) void {
     // Custom check for changing runtime logging
-    if (@intFromEnum(level) > @intFromEnum(runtime_level)) return;
+    if (@backingInt(level) > @backingInt(runtime_level)) return;
 
     // Copy-pasted implemetntion of defaultLog() from std.log
     const io = std.Options.debug_io;
@@ -31,7 +31,7 @@ fn logFn(
     if (builtin.os.tag == .macos) {
         // Added timestamp to output
         const ts = timestamp.Time.create(io);
-        stderr.writer.print("{f} ", .{ts.fmt(.syslog)}) catch {};
+        stderr.writer.print("{f} UTC ", .{ts.fmt(.syslog)}) catch {};
     }
     // Same return that std.log.defaultLog() does
     return std.log.defaultLogFileTerminal(level, scope, format, args, stderr) catch {};
@@ -106,7 +106,7 @@ fn wgToServer(
                 };
             } else |err| {
                 std.log.err(
-                    "Backend {f} failed: {any}",
+                    "Backend {f} failed: {t}",
                     .{ servers[current_id.load(.acquire)], err },
                 );
             }
@@ -144,7 +144,7 @@ fn serverToWg(
                 packet_arrived.store(true, .monotonic);
             } else |err| {
                 std.log.err(
-                    "Backend {f} failed: {any}",
+                    "Backend {f} failed: {t}",
                     .{ wg_addr, err },
                 );
             }
@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.log.err("Tried to set log level: {s}\nAvailable log levels: err, warn, info, debug", .{lvl});
         return error.UnknownLogLevel;
     } else {
-        std.log.info("Using default log level: {s}", .{@tagName(runtime_level)});
+        std.log.info("Using default log level: {t}", .{runtime_level});
     }
 
     // WireGuard -> Forwarder
@@ -206,7 +206,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Listen for WireGuard (client) packets
     var wg_sock = try std.Io.net.IpAddress.bind(&fw_listen_addr, io, .{
-        .ip6_only = false,
         .mode = .dgram,
         .protocol = .udp,
     });
@@ -218,7 +217,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     );
     // Listen for Server packets
     var serv_sock = try std.Io.net.IpAddress.bind(&server_listen_addr, io, .{
-        .ip6_only = false,
         .mode = .dgram,
         .protocol = .udp,
     });
