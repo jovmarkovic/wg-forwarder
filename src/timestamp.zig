@@ -104,18 +104,30 @@ pub const Time = struct {
     };
 };
 
+/// Monotonic milliseconds, excludes OS suspended time.
+/// Used for correct interval tracking
+const local_clock: clock = .awake;
+pub fn nowMs(io: std.Io) i64 {
+    return clock.Timestamp.now(io, local_clock).raw.toMilliseconds();
+}
+
+/// Sleep until `deadline` in milliseconds on the local clock.
+/// Returns immediately if that instant has already passed.
+pub fn waitUntil(io: std.Io, deadline: i64) error{Canceled}!void {
+    const d: clock.Timestamp = .{
+        .raw = .{ .nanoseconds = @intCast(deadline * std.time.ns_per_ms) },
+        .clock = local_clock,
+    };
+    return d.wait(io);
+}
+
 // ===========================================================
 // ====================unit test==============================
 // ===========================================================
 
 test "Time struct formatting" {
-    var arena_allocator = heap.ArenaAllocator.init(heap.page_allocator);
-    defer arena_allocator.deinit();
-    const alloc = arena_allocator.allocator();
-
-    // Setup IO (Required for clock.now)
-    var io_init = std.Io.Threaded.init(alloc, .{ .environ = .empty });
-    const io = io_init.io();
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
 
     //  Create the Time instance
     const tnow = Time.create(io);

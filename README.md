@@ -9,6 +9,7 @@ Change configuration file to yaml at some point (implement yaml parsing).
 Copy default config template and service file on installation step. 
 
 ---
+
 ## Usage/Flags
 ```
 -c <config_path>
@@ -22,6 +23,7 @@ Example:
 ```
 {
   "log_level": "info",
+  "address_family": "ip4",
   "client_endpoint": {
     "address": "127.0.0.1",
     "port": 51821
@@ -42,19 +44,22 @@ Example:
       "192.168.1.4:8921",
       "100.116.14.17:8921"
     ]
-  }
 }
 
 ```
-- when switcher enabled is set to false, it would skip the switcher thread and ignore auto switching endpoints.
-- server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0", port: 0
+- when switcher enabled is set to false, it would skip starting the switcher thread and ignore auto switching endpoints.
+- server_socket structure can be omitted. Defaults for it are: address: "0.0.0.0/::1", port: 0
 - timer can be omitted if the switcher is set to false. Otherwise it would panic 
-- log_level can be omitted, it will use zig's default log level in that case.
+- log_level can be omitted, it will use Zig's default log level in that case.
+- address_family can be ommited, default is ip4.
 - id is used to set an initial server endpoint. 
 
 ## Explanation
 - log_level: Runtime logging level of the service.
+- address_family: Runtime network family version of the service.
 - client_endpoint: Endpoint of the wireguard client that wants to send packets to a server.
+
+  Packets that arrive from a different endpoint are dropped with a warning.
 - forwarder_socket: Socket that accepts packets from client_endpoint. 
 
   In WireGuard client configuration you need to specify this as a peer endpoint for a server
@@ -62,26 +67,31 @@ Example:
   
   When not set, kernel will decide which port to use and listen on all addresses.
 
-- switcher: function that does seamless endpoint switching. 
-
+- switcher: function that does seamless endpoint switching. It uses interval set in `timer` with a 2s failover window.
+  
+  Failover is meant to speed up the process of finding responsive endpoint.
   If set to false, use ID to set the index of your desired server endpoint.
+  Packets that arrive from a different endpoint are dropped with a warning.
 
-## Options
-log_level: err, warn, info, debug
+## Configuration types
+- log_level: err, warn, info, debug
 
-address: IPv4
+- address_family: union(enum) ip4, ip6
 
-port: u16
+- address: IPv4, IPv6
 
-timer: (usize) seconds 
+- port: u16
 
-id: usize (u32 on x86 / u64 on x64)
+- timer: (u32) seconds 
 
-enabled: bool
+- id: u32
 
-endpoints: [ "IPv4:port", "IPv4:port", ... ,"IPv4:port" ]
+- enabled: bool
+
+- endpoints: [ "IPv4/[IPv6]:port", "IPv4/[IPv6]:port", ... ,"IPv4/[IPv6]:port" ]
 
 ---
+
 ## Credits
 
 - Adjusted loging timestamp support provided by [ehrktia's zig-epoch](https://github.com/ehrktia/zig-epoch)
