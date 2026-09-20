@@ -1,6 +1,6 @@
 const std = @import("std");
 const EndpointPool = @import("endpoints.zig").EndpointPool;
-const nowSeconds = @import("timestamp.zig").nowSeconds;
+const nowMs = @import("timestamp.zig").nowMs;
 
 pub const SwitcherState = struct {
     const Self = @This();
@@ -28,8 +28,8 @@ pub const SwitcherState = struct {
     // Thread handle to allow re-spawning
     thread: ?std.Thread = null,
 
-    /// Timestamp of a packet arrived from the client
-    last_send_at: std.atomic.Value(i64) = .init(0),
+    /// Timestamp of an oldest packet arrived from the client before a reply
+    first_send_at: std.atomic.Value(i64) = .init(0),
     /// Timestamp of a packet arrived from the endpoint
     last_reply_at: std.atomic.Value(i64) = .init(0),
     /// Can be null if the thread is not running.
@@ -54,23 +54,33 @@ pub const SwitcherState = struct {
     /// Switcher function
     pub fn run(self: *Self) void {
         var failing_over = false;
+        // Reset packet timestamps
+        self.first_send_at.store(nowMs(self.io), .monotonic);
+        self.last_reply_at.store(nowMs(self.io), .monotonic);
 
         while (true) {
             // Blocks while paused; null means exit. One lock, one snapshot.
             const idle = self.threadHandler() orelse break;
 
-            const now = nowSeconds(self.io);
-            const last_send = self.last_send_at.load(.monotonic);
+            const last_send = self.first_send_at.load(.monotonic);
             const last_reply = self.last_reply_at.load(.monotonic);
-            std.log.debug("switcher: duration={d} last_send={d} last_reply={d}", .{
-                idle, last_send, last_reply,
-            });
 
             const duration = if (failing_over) self.probe_interval else idle;
+            const dur_ms = duration * std.time.ms_per_s;
+            std.log.debug("switcher: dur_ms={d}ms last_send={d}ms last_reply={d}ms", .{
+                dur_ms, last_send, last_reply,
+            });
 
-            // Only judge the endpoint if we've spoken to it since it last spoke to us,
-            // and it has been silent for `duration`.
-            if (last_send > last_reply and now - last_reply >= duration) {
+            // Only judge the endpoint if we've spoken to it since it last spoke to us.
+            if (last_send > last_reply) {
+                const deadline: i64 = last_send + dur_ms;
+                const now = nowMs(self.io);
+                // If deadline is not met, sleep for the reamainder
+                if (now < deadline) {
+                    if (!self.waitFor(deadline)) break;
+                    continue;
+                }
+
                 const fo = self.endpoints.failoverToNext(self.io, now);
                 if (fo.selected) |e| {
                     if (fo.changed) {
@@ -87,7 +97,7 @@ pub const SwitcherState = struct {
                     std.log.warn("switcher: endpoint pool is empty", .{});
                 }
                 // give the new endpoint a fresh window
-                self.last_reply_at.store(nowSeconds(self.io), .monotonic);
+                self.last_reply_at.store(nowMs(self.io), .monotonic);
                 failing_over = true;
 
                 // If packed had arrived in time mark the connection as good.
@@ -97,7 +107,7 @@ pub const SwitcherState = struct {
             }
 
             // Sleep at the end for `duration`
-            if (!self.waitFor(duration)) break;
+            if (!self.waitFor(dur_ms)) break;
         }
     }
 
@@ -197,14 +207,15 @@ pub const SwitcherState = struct {
         return self.idle_timeout.?;
     }
 
-    /// Wait up to `duration`, waking early on any state change.
+    /// Wait up to `duration` timestamp in milliseconds.
+    /// Waking early on any state change.
     /// Returns false if the switcher should exit.
     fn waitFor(self: *Self, duration: i64) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         // Create a duration struct
-        const dur: std.Io.Clock.Duration = .{ .raw = .fromSeconds(duration), .clock = .awake };
+        const dur: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(duration), .clock = .awake };
         // Return error.Tiemout based on a duration struct
         const timeout: std.Io.Timeout = .{ .deadline = .fromNow(self.io, dur) };
 

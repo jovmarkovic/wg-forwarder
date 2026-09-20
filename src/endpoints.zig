@@ -498,7 +498,7 @@ pub const EndpointPool = struct {
 const testing = std.testing;
 
 /// Flip to false to silence the walkthrough test.
-const show_dumps = true;
+const show_dumps = false;
 
 /// A pool, so each test is two lines of setup. The `Io` comes from
 /// `std.testing.io`, which the test runner owns and initialises.

@@ -179,8 +179,8 @@ pub const Time = struct {
 
 /// Monotonic seconds, excludes OS suspended time.
 /// Used for correct interval tracking
-pub fn nowSeconds(io: std.Io) i64 {
-    return clock.Timestamp.now(io, .awake).raw.toSeconds();
+pub fn nowMs(io: std.Io) i64 {
+    return clock.Timestamp.now(io, .awake).raw.toMilliseconds();
 }
 
 // Tests
@@ -190,7 +190,7 @@ pub fn nowSeconds(io: std.Io) i64 {
 
 const testing = std.testing;
 
-const show_stamp = true;
+const show_stamp = false;
 
 /// Build a `Timestamp` from milliseconds since the Unix epoch. No `Io`.
 fn tsFromMs(ms: i64) std.Io.Timestamp {
@@ -507,8 +507,8 @@ test "Formatter: fmtAt overrides the clock instead of ignoring its argument" {
 }
 
 test "nowSeconds is monotonic and in the right ballpark" {
-    const a = nowSeconds(testing.io);
-    const b = nowSeconds(testing.io);
+    const a = nowMs(testing.io);
+    const b = nowMs(testing.io);
     try testing.expect(b >= a); // .awake never goes backwards
     try testing.expect(b - a < 5); // and two adjacent calls are not minutes apart
 }

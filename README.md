@@ -68,6 +68,8 @@ Example:
 - log_level: Runtime logging level of the service.
 - address_family: Runtime network family version of the service.
 - client_endpoint: Endpoint of the wireguard client that wants to send packets to a server.
+
+  Packets that arrive from a different endpoint are dropped with a warning.
 - forwarder_socket: Socket that accepts packets from client_endpoint. 
 
   In WireGuard client configuration you need to specify this as a peer endpoint for a server
@@ -75,9 +77,12 @@ Example:
   
   When not set, kernel will decide which port to use and listen on all addresses.
 
-- switcher: function that does seamless endpoint switching. 
+- switcher: function that does seamless endpoint switching. It uses interval set in `timer` with a 2s failover window.
 
-  If set to false, use ID to set the index of your desired server endpoint.
+  Failover is meant to speed up the process of finding responsive endpoint. 
+  If set to false, use ID to set the index of your desired server endpoint. 
+  Packets that arrive from a different endpoint are dropped with a warning. 
+
 
 - admin_console: function that opens up server endpoint for chagning forwarder's runtime state. 
 
