@@ -10,9 +10,10 @@ const Reader = struct {
     }
 
     /// Deinit of the parsed structure and a buffer that holds the data
-    pub fn deinit(self: Reader, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *Reader, gpa: std.mem.Allocator) void {
         self.parsed.deinit();
         gpa.free(self.buf);
+        self.* = undefined;
     }
 };
 

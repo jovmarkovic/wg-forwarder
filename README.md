@@ -9,6 +9,7 @@ Change configuration file to yaml at some point (implement yaml parsing).
 Copy default config template and service file on installation step. 
 
 ---
+
 ## Usage/Flags
 ```
 -c <config_path>
@@ -142,6 +143,7 @@ Available Switcher Commands:
 ```
 
 ---
+
 ## Credits
 
 - Adjusted loging timestamp support provided by [ehrktia's zig-epoch](https://github.com/ehrktia/zig-epoch)

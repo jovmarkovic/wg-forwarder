@@ -74,7 +74,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const path = args[2];
-    const reader = try parser.readFile(io, alloc, path);
+    var reader = try parser.readFile(io, alloc, path);
     defer reader.deinit(alloc);
     const config = reader.config();
     try parser.validate(config);
@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 continue;
             },
             error.Duplicate => {
-                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {t}", .{
+                std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is a duplicate", .{
                     idx, ep, config.address_family,
                 });
                 bad_addr = true;
