@@ -78,7 +78,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer reader.deinit(alloc);
     const config = reader.config();
     try parser.validate(config);
-    std.debug.print("{}\n", .{config});
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -126,14 +125,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         config.client_endpoint.address,
         config.client_endpoint.port,
     );
-    _ = try EndpointPool.requireFamily(wg_listen_addr, config.address_family);
+    try EndpointPool.matchFamily(wg_listen_addr, config.address_family);
 
     // Forwarder
     const fw_listen_addr = try std.Io.net.IpAddress.parse(
         config.forwarder_socket.address,
         config.forwarder_socket.port,
     );
-    _ = try EndpointPool.requireFamily(fw_listen_addr, config.address_family);
+    try EndpointPool.matchFamily(fw_listen_addr, config.address_family);
 
     // Listen for WireGuard (client) packets
     var wg_sock = try std.Io.net.IpAddress.bind(&fw_listen_addr, io, .{
@@ -146,7 +145,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         config.server_socket.address orelse parser.anyAddress(config.address_family),
         config.server_socket.port,
     );
-    _ = try EndpointPool.requireFamily(endpoint_listen_addr, config.address_family);
+    try EndpointPool.matchFamily(endpoint_listen_addr, config.address_family);
 
     // Listen for Endpoint packets
     var endpoint_sock = try std.Io.net.IpAddress.bind(&endpoint_listen_addr, io, .{

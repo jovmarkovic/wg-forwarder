@@ -92,12 +92,12 @@ pub const EndpointPool = struct {
     }
 
     /// Returns a family if address matches the wanted type or an error
-    pub fn requireFamily(
+    pub fn matchFamily(
         addr: std.Io.net.IpAddress,
         want: std.Io.net.IpAddress.Family,
-    ) error{WrongFamily}!std.Io.net.IpAddress {
+    ) error{WrongFamily}!void {
         const got: std.Io.net.IpAddress.Family = addr; // tagged union coerces to its tag
-        return if (got == want) addr else error.WrongFamily;
+        if (got != want) return error.WrongFamily;
     }
 
     /// Returns an address of the current active endpoint if it has it.
@@ -175,7 +175,7 @@ pub const EndpointPool = struct {
         addr: std.Io.net.IpAddress,
     ) error{ Duplicate, OutOfMemory, WrongFamily }!u32 {
         // Check if address family matches first
-        _ = try requireFamily(addr, self.addr_family);
+        try matchFamily(addr, self.addr_family);
         // Using lockUncancelable for writing
         self.lock.lockUncancelable(io);
         defer self.lock.unlock(io);
@@ -206,7 +206,7 @@ pub const EndpointPool = struct {
         new: std.Io.net.IpAddress,
     ) error{ Duplicate, NotFound, WrongFamily }!Endpoint {
         // Check for address family before the lock
-        _ = try requireFamily(new, self.addr_family);
+        try matchFamily(new, self.addr_family);
 
         // Using lockUncancelable for potenital writing
         self.lock.lockUncancelable(io);
@@ -1224,10 +1224,10 @@ test "requireFamily: accepts a match and rejects the other family" {
     const v4 = try std.Io.net.IpAddress.parse("127.0.0.1", 80);
     const v6 = try std.Io.net.IpAddress.parse("::1", 80);
 
-    _ = try EndpointPool.requireFamily(v4, .ip4);
-    _ = try EndpointPool.requireFamily(v6, .ip6);
-    try testing.expectError(error.WrongFamily, EndpointPool.requireFamily(v4, .ip6));
-    try testing.expectError(error.WrongFamily, EndpointPool.requireFamily(v6, .ip4));
+    try EndpointPool.matchFamily(v4, .ip4);
+    try EndpointPool.matchFamily(v6, .ip6);
+    try testing.expectError(error.WrongFamily, EndpointPool.matchFamily(v4, .ip6));
+    try testing.expectError(error.WrongFamily, EndpointPool.matchFamily(v6, .ip4));
 }
 
 test "an ip6 pool accepts ip6 and rejects ip4" {

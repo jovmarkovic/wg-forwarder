@@ -17,7 +17,7 @@ pub fn adminServer(
 ) !void {
     const limit_msg = "Too many sessions.\n";
     const addr = try std.Io.net.IpAddress.parse(ip, port);
-    _ = try EndpointPool.requireFamily(addr, endpoints.addr_family);
+    try EndpointPool.matchFamily(addr, endpoints.addr_family);
     var server = try std.Io.net.IpAddress.listen(&addr, io, .{
         .mode = .stream,
         .reuse_address = true,
