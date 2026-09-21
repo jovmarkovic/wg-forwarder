@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             },
             error.Duplicate => {
                 std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is a duplicate", .{
-                    idx, ep, config.address_family,
+                    idx, ep,
                 });
                 bad_addr = true;
                 continue;
@@ -184,6 +184,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.log.info("Spawning client listener....", .{});
     const client_thread = try std.Thread.spawn(.{}, wgToServer, .{
         io,
+        wg_listen_addr,
         &switcher,
         &wg_sock,
         &endpoint_sock,

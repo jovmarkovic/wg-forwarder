@@ -5,12 +5,12 @@ const nowMs = @import("timestamp.zig").nowMs;
 
 pub fn wgToServer(
     io: std.Io,
+    wg_addr: std.Io.net.IpAddress,
     switcher: *SwitcherState,
     wg_sock: *std.Io.net.Socket,
     serv_sock: *std.Io.net.Socket,
     buf: []u8,
     endpoints: *EndpointPool,
-    wg_addr: std.Io.net.IpAddress,
 ) !void {
     while (true) {
 
