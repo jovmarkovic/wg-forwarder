@@ -177,10 +177,22 @@ pub const Time = struct {
     };
 };
 
-/// Monotonic seconds, excludes OS suspended time.
+/// Selected clock for tracking packet timestamps
+const local_clock: clock = .awake;
+/// Monotonic milliseconds, excludes OS suspended time.
 /// Used for correct interval tracking
 pub fn nowMs(io: std.Io) i64 {
-    return clock.Timestamp.now(io, .awake).raw.toMilliseconds();
+    return clock.Timestamp.now(io, local_clock).raw.toMilliseconds();
+}
+
+/// Constructs a `Timeout` based upon passed duration in milliseconds
+pub fn timer(duration: i64) std.Io.Timeout {
+    return .{
+        .deadline = .{
+            .raw = .{ .nanoseconds = @intCast(duration * std.time.ns_per_ms) },
+            .clock = local_clock,
+        },
+    };
 }
 
 // Tests

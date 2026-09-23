@@ -1,6 +1,7 @@
 const std = @import("std");
 const EndpointPool = @import("endpoints.zig").EndpointPool;
 const nowMs = @import("timestamp.zig").nowMs;
+const timer = @import("timestamp.zig").timer;
 
 pub const SwitcherState = struct {
     const Self = @This();
@@ -71,13 +72,13 @@ pub const SwitcherState = struct {
                 dur_ms, first_send, last_reply,
             });
 
+            const now = nowMs(self.io);
             // Only judge the endpoint if we've spoken to it since it last spoke to us.
             if (first_send > last_reply) {
                 const deadline: i64 = first_send + dur_ms;
-                const now = nowMs(self.io);
                 // If deadline is not met, sleep for the reamainder
                 if (now < deadline) {
-                    if (!self.waitFor(deadline - now)) break;
+                    if (!self.waitUntil(deadline)) break;
                     continue;
                 }
 
@@ -97,17 +98,18 @@ pub const SwitcherState = struct {
                     std.log.warn("switcher: endpoint pool is empty", .{});
                 }
                 // give the new endpoint a fresh window
-                self.last_reply_at.store(nowMs(self.io), .monotonic);
+                self.last_reply_at.store(now, .monotonic);
                 failing_over = true;
 
                 // If packed had arrived in time mark the connection as good.
-            } else if (first_send <= last_reply) {
+            } else if (first_send < last_reply) {
                 self.endpoints.markCurrentGood(self.io);
                 failing_over = false;
             }
 
-            // Sleep at the end for `duration`
-            if (!self.waitFor(dur_ms)) break;
+            // create a new deadline with fresh timestamp after the blocking functions
+            const deadline = dur_ms + nowMs(self.io);
+            if (!self.waitUntil(deadline)) break;
         }
     }
 
@@ -207,20 +209,18 @@ pub const SwitcherState = struct {
         return self.idle_timeout.?;
     }
 
-    /// Wait up to `duration` timestamp in milliseconds.
+    /// Wait up to `deadline` timestamp in milliseconds.
     /// Waking early on any state change.
     /// Returns false if the switcher should exit.
-    fn waitFor(self: *Self, duration: i64) bool {
+    fn waitUntil(self: *Self, deadline: i64) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        // Create a duration struct
-        const dur: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(duration), .clock = .awake };
         // Return error.Tiemout based on a duration struct
-        const timeout: std.Io.Timeout = .{ .deadline = .fromNow(self.io, dur) };
+        const t = timer(deadline);
 
         while (self.is_running and !self.wake_requested) {
-            self.cond.waitTimeout(self.io, &self.mutex, timeout) catch |err| switch (err) {
+            self.cond.waitTimeout(self.io, &self.mutex, t) catch |err| switch (err) {
                 error.Timeout => break,
                 // For safety in case we switch to ther Io implementation
                 error.Canceled => {
