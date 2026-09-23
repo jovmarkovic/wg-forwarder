@@ -62,22 +62,22 @@ pub const SwitcherState = struct {
             // Blocks while paused; null means exit. One lock, one snapshot.
             const idle = self.threadHandler() orelse break;
 
-            const last_send = self.first_send_at.load(.monotonic);
+            const first_send = self.first_send_at.load(.monotonic);
             const last_reply = self.last_reply_at.load(.monotonic);
 
             const duration = if (failing_over) self.probe_interval else idle;
             const dur_ms = duration * std.time.ms_per_s;
-            std.log.debug("switcher: dur_ms={d}ms last_send={d}ms last_reply={d}ms", .{
-                dur_ms, last_send, last_reply,
+            std.log.debug("switcher: dur_ms={d}ms first_send={d}ms last_reply={d}ms", .{
+                dur_ms, first_send, last_reply,
             });
 
             // Only judge the endpoint if we've spoken to it since it last spoke to us.
-            if (last_send > last_reply) {
-                const deadline: i64 = last_send + dur_ms;
+            if (first_send > last_reply) {
+                const deadline: i64 = first_send + dur_ms;
                 const now = nowMs(self.io);
                 // If deadline is not met, sleep for the reamainder
                 if (now < deadline) {
-                    if (!self.waitFor(deadline)) break;
+                    if (!self.waitFor(deadline - now)) break;
                     continue;
                 }
 
@@ -101,7 +101,7 @@ pub const SwitcherState = struct {
                 failing_over = true;
 
                 // If packed had arrived in time mark the connection as good.
-            } else if (last_reply > 0 and last_send <= last_reply) {
+            } else if (first_send <= last_reply) {
                 self.endpoints.markCurrentGood(self.io);
                 failing_over = false;
             }
