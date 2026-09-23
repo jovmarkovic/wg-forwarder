@@ -38,17 +38,17 @@ pub const SwitcherState = struct {
                     dur_ms, first_send, last_reply,
                 });
 
+                const now: i64 = nowMs(io);
                 // Check if more than duration had passed between send and a reply.
                 if (first_send > last_reply) {
                     const deadline: i64 = first_send + dur_ms;
-                    const now: i64 = nowMs(io);
                     // If deadline is not met, sleep for the reamainder
                     if (now < deadline) {
                         try waitUntil(io, deadline);
                         continue;
                     }
 
-                    const changed = self.endpoints.failoverToNext(nowMs(io));
+                    const changed = self.endpoints.failoverToNext(now);
                     if (changed) {
                         std.log.info("Switched to {d} address: {?f} health: {?t}", .{
                             self.endpoints.current_id.load(.monotonic),
@@ -62,15 +62,16 @@ pub const SwitcherState = struct {
                         );
                     }
                     // give the new endpoint a fresh window
-                    self.last_reply_at.store(nowMs(io), .monotonic);
+                    self.last_reply_at.store(now, .monotonic);
                     failing_over = true;
                     // If packed had arrived in time mark the connection as good.
-                } else if (last_reply > 0 and first_send <= last_reply) {
+                } else if (first_send < last_reply) {
                     self.endpoints.markCurrentGood();
                     failing_over = false;
                 }
-                // Sleep at the end for `duration`
-                try io.sleep(.fromSeconds(duration), .awake);
+                // create a new deadline with fresh timestamp
+                const deadline = dur_ms + nowMs(self.io);
+                try waitUntil(io, deadline);
             }
         } else {
             std.log.err("Switcher got called but timer variable value is: {?d}", .{self.idle_timeout});
