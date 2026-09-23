@@ -20,7 +20,7 @@ pub fn wgToServer(
             std.log.debug("Received {d} bytes from WireGuard", .{recv.data.len});
 
             if (!std.Io.net.IpAddress.eql(&recv.from, &wg_addr)) {
-                std.log.warn("Wrong client responding: {f}\nCorrect client: {f}", .{ recv.from, wg_addr });
+                std.log.warn("Wrong client responding: {f} expected: {f}", .{ recv.from, wg_addr });
                 continue;
             }
 
@@ -35,10 +35,10 @@ pub fn wgToServer(
                 if (switcher.first_send_at.load(.monotonic) <= reply)
                     switcher.first_send_at.store(nowMs(io), .monotonic);
             } else |err| {
-                std.log.err("Backend send failed to: {f} {t}", .{ endpoint, err });
+                std.log.err("Backend send to: {f} {t}", .{ endpoint, err });
             }
         } else |err| {
-            std.log.err("Backend receive from: {f} failed: {t}", .{ wg_sock.address, err });
+            std.log.err("Backend receive from: {f} {t}", .{ wg_sock.address, err });
             return err;
         }
     }
@@ -65,7 +65,7 @@ pub fn serverToWg(
                 continue;
             };
             if (!std.Io.net.IpAddress.eql(&addr, &endpoint)) {
-                std.log.warn("Wrong server {f}; expected {f}", .{
+                std.log.warn("Wrong server responding: {f} expected: {f}", .{
                     addr, endpoint,
                 });
                 continue;
@@ -74,10 +74,10 @@ pub fn serverToWg(
                 // Confirm packet came from the server
                 switcher.last_reply_at.store(nowMs(io), .monotonic);
             } else |err| {
-                std.log.err("Backend send failed to: {f} {t}", .{ wg_addr, err });
+                std.log.err("Backend send to: {f} {t}", .{ wg_addr, err });
             }
         } else |err| {
-            std.log.err("Backend receive from: {f} failed: {t}", .{ serv_sock.address, err });
+            std.log.err("Backend receive from: {f} {t}", .{ serv_sock.address, err });
             return err;
         }
     }
