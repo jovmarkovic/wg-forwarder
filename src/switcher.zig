@@ -29,18 +29,18 @@ pub const SwitcherState = struct {
             self.last_reply_at.store(nowMs(io), .monotonic);
 
             while (true) {
-                const last_send = self.first_send_at.load(.monotonic);
+                const first_send = self.first_send_at.load(.monotonic);
                 const last_reply = self.last_reply_at.load(.monotonic);
                 const duration: i64 = if (failing_over) self.probe_interval else idle;
                 const dur_ms: i64 = duration * std.time.ms_per_s;
 
-                std.log.debug("switcher: dur_ms={d}ms last_send={d}ms last_reply={d}ms", .{
-                    dur_ms, last_send, last_reply,
+                std.log.debug("switcher: dur_ms={d}ms first_send={d}ms last_reply={d}ms", .{
+                    dur_ms, first_send, last_reply,
                 });
 
                 // Check if more than duration had passed between send and a reply.
-                if (last_send > last_reply) {
-                    const deadline: i64 = last_send + dur_ms;
+                if (first_send > last_reply) {
+                    const deadline: i64 = first_send + dur_ms;
                     const now: i64 = nowMs(io);
                     // If deadline is not met, sleep for the reamainder
                     if (now < deadline) {
@@ -65,7 +65,7 @@ pub const SwitcherState = struct {
                     self.last_reply_at.store(nowMs(io), .monotonic);
                     failing_over = true;
                     // If packed had arrived in time mark the connection as good.
-                } else if (last_reply > 0 and last_send <= last_reply) {
+                } else if (last_reply > 0 and first_send <= last_reply) {
                     self.endpoints.markCurrentGood();
                     failing_over = false;
                 }
