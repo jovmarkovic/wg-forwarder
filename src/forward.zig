@@ -30,10 +30,9 @@ pub fn wgToServer(
 
             std.log.debug("Trying to send to {f}", .{addr});
             if (std.Io.net.Socket.send(serv_sock, io, &addr, packet)) {
-                // Save a timestamp of the oldest sent package prior to the reply only
-                const reply = switcher.last_reply_at.load(.monotonic);
-                if (switcher.first_send_at.load(.monotonic) <= reply)
-                    switcher.first_send_at.store(nowMs(io), .monotonic);
+                // Start a timer if it's in `paused` state
+                if (switcher.state.cmpxchgStrong(.paused, .running, .release, .monotonic) == null)
+                    io.futexWake(SwitcherState.State, &switcher.state.raw, 1);
             } else |err| {
                 std.log.err("Backend send to: {f} failed: {t}", .{ addr, err });
             }
@@ -73,14 +72,15 @@ pub fn serverToWg(
                 // If Received packet comes before sending packet is out at startup, discard it
                 continue;
             }
-            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) {
-                switcher.last_reply_at.store(nowMs(io), .monotonic);
-            } else |err| {
+            // Reset the state on packet arrived
+            switcher.reset(io);
+            std.log.debug("Trying to send to {f}", .{wg_addr});
+            std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet) catch |err| {
                 std.log.err(
                     "Backend send to :{f} failed: {t}",
                     .{ wg_addr, err },
                 );
-            }
+            };
         } else |err| {
             std.log.err(
                 "Backend receive from: {f} failed: {t}",

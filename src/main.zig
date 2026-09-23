@@ -35,7 +35,7 @@ fn logFn(
     if (builtin.os.tag == .macos) {
         // Added timestamp to output
         const ts = timestamp.Time.create(io);
-        stderr.writer.print("{f} UTC ", .{ts.fmt(.syslog)}) catch {};
+        stderr.writer.print("{f} UTC ", .{ts.fmt(.now)}) catch {};
     }
     // Same return that std.log.defaultLog() does
     return std.log.defaultLogFileTerminal(level, scope, format, args, stderr) catch {};

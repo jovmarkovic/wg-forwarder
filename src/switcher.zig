@@ -1,16 +1,18 @@
 const std = @import("std");
 const EndpointPool = @import("endpoints.zig").EndpointPool;
 const nowMs = @import("timestamp.zig").nowMs;
-const waitUntil = @import("timestamp.zig").waitUntil;
+const timer = @import("timestamp.zig").timer;
 
 pub const SwitcherState = struct {
     const Self = @This();
+    pub const State = enum(u32) { running, paused, stopped };
     endpoints: *EndpointPool,
 
-    /// Timestamp of an oldest packet arrived from the client before a reply
-    first_send_at: std.atomic.Value(i64) = .init(0),
-    /// Timestamp of a newest packet arrived from the endpoint
-    last_reply_at: std.atomic.Value(i64) = .init(0),
+    /// Switcher running state
+    state: std.atomic.Value(State) = .init(.paused),
+    /// Failover state if no packets arrived after a switch
+    failvover: std.atomic.Value(bool) = .init(false),
+
     /// Can be null if the thread is not running.
     /// Silence from the current endpoint that means "dead". Tied to PersistentKeepalive cadence.
     idle_timeout: ?i64,
@@ -22,60 +24,53 @@ pub const SwitcherState = struct {
     pub fn run(self: *Self, io: std.Io) error{ FailedToUnwrap, Canceled }!void {
         // Unwrap timer optional
         if (self.idle_timeout) |idle| {
-            // Declare constants once before the main loop
-            var failing_over = false;
-            // Reset packet timestamps
-            self.first_send_at.store(nowMs(io), .monotonic);
-            self.last_reply_at.store(nowMs(io), .monotonic);
-
             while (true) {
-                const first_send = self.first_send_at.load(.monotonic);
-                const last_reply = self.last_reply_at.load(.monotonic);
-                const duration: i64 = if (failing_over) self.probe_interval else idle;
-                const dur_ms: i64 = duration * std.time.ms_per_s;
+                // park until wgToServer starts it
+                while (self.state.load(.acquire) == .paused)
+                    try io.futexWait(State, &self.state.raw, .paused);
+                // Nothing is setting `stopped` in 0.16.0 but it's safe to have a guard for it
+                if (self.state.load(.acquire) == .stopped) return;
 
-                std.log.debug("switcher: dur_ms={d}ms first_send={d}ms last_reply={d}ms", .{
-                    dur_ms, first_send, last_reply,
-                });
+                const duration: i64 = if (self.failvover.load(.monotonic)) self.probe_interval else idle;
+                const dur_ms: i64 = duration * std.time.ms_per_s;
+                const deadline: i64 = nowMs(io) + dur_ms;
+
+                while (self.state.load(.monotonic) == .running) {
+                    const now: i64 = nowMs(io);
+                    if (now >= deadline) break;
+                    try io.futexWaitTimeout(State, &self.state.raw, .running, timer(deadline));
+                }
+                // If packet had arrived during the sleep, re-start the main loop
+                if (self.state.load(.acquire) != .running) continue;
 
                 const now: i64 = nowMs(io);
-                // Check if more than duration had passed between send and a reply.
-                if (first_send > last_reply) {
-                    const deadline: i64 = first_send + dur_ms;
-                    // If deadline is not met, sleep for the reamainder
-                    if (now < deadline) {
-                        try waitUntil(io, deadline);
-                        continue;
-                    }
-
-                    const changed = self.endpoints.failoverToNext(now);
-                    if (changed) {
-                        std.log.info("Switched to {d} address: {?f} health: {?t}", .{
-                            self.endpoints.current_id.load(.monotonic),
-                            self.endpoints.currentAddr(),
-                            self.endpoints.currentHealth(),
-                        });
-                    } else {
-                        std.log.warn(
-                            "switcher: no alternative endpoint available, retrying {?f}",
-                            .{self.endpoints.currentAddr()},
-                        );
-                    }
-                    // give the new endpoint a fresh window
-                    self.last_reply_at.store(now, .monotonic);
-                    failing_over = true;
-                    // If packed had arrived in time mark the connection as good.
-                } else if (first_send < last_reply) {
-                    self.endpoints.markCurrentGood();
-                    failing_over = false;
+                const changed = self.endpoints.failoverToNext(now);
+                if (changed) {
+                    std.log.info("Switched to ID: {d} address: {?f} health: {?t}", .{
+                        self.endpoints.current_id.load(.monotonic),
+                        self.endpoints.currentAddr(),
+                        self.endpoints.currentHealth(),
+                    });
+                } else {
+                    std.log.warn(
+                        "switcher: no alternative endpoint available, retrying {?f}",
+                        .{self.endpoints.currentAddr()},
+                    );
                 }
-                // create a new deadline with fresh timestamp
-                const deadline = dur_ms + nowMs(self.io);
-                try waitUntil(io, deadline);
+                self.failvover.store(true, .monotonic);
+                self.state.store(.paused, .monotonic);
             }
         } else {
             std.log.err("Switcher got called but timer variable value is: {?d}", .{self.idle_timeout});
             return error.FailedToUnwrap;
         }
+    }
+
+    /// Reset switcher state and mark current endpoint as valid
+    pub fn reset(self: *Self, io: std.Io) void {
+        self.endpoints.markCurrentGood();
+        self.failvover.store(false, .monotonic);
+        if (self.state.cmpxchgStrong(.running, .paused, .release, .monotonic) == null)
+            io.futexWake(State, &self.state.raw, 1);
     }
 };

@@ -39,7 +39,7 @@ Example:
   "switcher": {
     "enabled": false,
     "id": 0,
-    "timer": 19,
+    "timer": 12,
     "endpoints": [
       "192.168.1.4:8921",
       "100.116.14.17:8921"
@@ -72,6 +72,11 @@ Example:
   Failover is meant to speed up the process of finding responsive endpoint.
   If set to false, use ID to set the index of your desired server endpoint.
   Packets that arrive from a different endpoint are dropped with a warning.
+
+# NOTE:
+  Wireguard's `KEEPALIVE_TIMEOUT` is 10s after the end of stream. 
+  `timer` should be longer than it unless `PersistentKeepalive` flag is set explicitly in its config.
+
 
 ## Configuration types
 - log_level: err, warn, info, debug

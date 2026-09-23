@@ -111,14 +111,14 @@ pub fn nowMs(io: std.Io) i64 {
     return clock.Timestamp.now(io, local_clock).raw.toMilliseconds();
 }
 
-/// Sleep until `deadline` in milliseconds on the local clock.
-/// Returns immediately if that instant has already passed.
-pub fn waitUntil(io: std.Io, deadline: i64) error{Canceled}!void {
-    const d: clock.Timestamp = .{
-        .raw = .{ .nanoseconds = @intCast(deadline * std.time.ns_per_ms) },
-        .clock = local_clock,
+/// Constructs a `Timeout` based upon passed duration in milliseconds
+pub fn timer(duration: i64) std.Io.Timeout {
+    return .{
+        .deadline = .{
+            .raw = .{ .nanoseconds = @intCast(duration * std.time.ns_per_ms) },
+            .clock = local_clock,
+        },
     };
-    return d.wait(io);
 }
 
 // ===========================================================
