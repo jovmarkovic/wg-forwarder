@@ -104,7 +104,7 @@ pub fn check(cfg: Config) Problems {
     if (sw.enabled) {
         if (sw.timer) |t| {
             if (t == 0) found.insert(.zero_timer);
-            if (t > 12) std.log.warn("Switcher time is > 12s! Make sure to have PersistentKeepalive set.", .{});
+            if (t < 12) std.log.warn("Switcher time is < 12s! Make sure to have PersistentKeepalive set.", .{});
         } else {
             found.insert(.missing_timer);
         }
