@@ -20,7 +20,7 @@ pub fn wgToServer(
             std.log.debug("Received {d} bytes from WireGuard", .{recv.data.len});
 
             if (!std.Io.net.IpAddress.eql(&recv.from, &wg_addr)) {
-                std.log.warn("Wrong client responding: {f}\nCorrect client: {f}", .{ recv.from, wg_addr });
+                std.log.warn("Wrong client responding: {f} expected: {f}", .{ recv.from, wg_addr });
                 continue;
             }
             const addr = servers.currentAddr() orelse {
@@ -66,7 +66,7 @@ pub fn serverToWg(
             std.log.debug("Received {d} bytes, server: {f}", .{ recv.data.len, addr });
 
             if (!std.Io.net.IpAddress.eql(&addr, &server)) {
-                std.log.warn("Wrong server responding: {f}\nCorrect server: {f}", .{ addr, server });
+                std.log.warn("Wrong server responding: {f} expected: {f}", .{ addr, server });
                 // If Received packet comes before sending packet is out at startup, discard it
                 continue;
             }
