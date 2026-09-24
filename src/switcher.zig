@@ -41,8 +41,13 @@ pub const SwitcherState = struct {
                 const dur_ms: i64 = duration * std.time.ms_per_s;
                 const deadline: i64 = nowMs(io) + dur_ms;
 
-                try io.futexWaitTimeout(State, &self.state.raw, timeout_state, timer(deadline));
+                // Guard againds spurious wakeups
+                while (std.meta.eql(timeout_state, self.state.load(.acquire))) {
+                    if (nowMs(io) >= deadline) break; // genuine expiry
+                    try io.futexWaitTimeout(State, &self.state.raw, timeout_state, timer(deadline));
+                }
 
+                // Guard againdst different states after the sleep
                 if (!std.meta.eql(timeout_state, self.state.load(.acquire))) {
                     self.failvover.store(false, .monotonic);
                     continue;
