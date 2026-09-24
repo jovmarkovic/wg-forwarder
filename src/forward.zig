@@ -28,8 +28,8 @@ pub fn wgToServer(
                 continue;
             };
 
-            // Start a timer in a switcher thread
-            switcher.timerStart(io);
+            // Guard against keepalive packet from the client
+            if (packet.len > 32) switcher.timerStart(io);
             std.log.debug("Trying to send to {f}", .{addr});
             std.Io.net.Socket.send(serv_sock, io, &addr, packet) catch |err| {
                 std.log.err("Backend send to: {f} failed: {t}", .{ addr, err });
