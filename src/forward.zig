@@ -28,14 +28,12 @@ pub fn wgToServer(
                 continue;
             };
 
+            // Start a timer in a switcher thread
+            switcher.timerStart(io);
             std.log.debug("Trying to send to {f}", .{addr});
-            if (std.Io.net.Socket.send(serv_sock, io, &addr, packet)) {
-                // Start a timer if it's in `paused` state
-                if (switcher.state.cmpxchgStrong(.paused, .running, .release, .monotonic) == null)
-                    io.futexWake(SwitcherState.State, &switcher.state.raw, 1);
-            } else |err| {
+            std.Io.net.Socket.send(serv_sock, io, &addr, packet) catch |err| {
                 std.log.err("Backend send to: {f} failed: {t}", .{ addr, err });
-            }
+            };
         } else |err| {
             std.log.err(
                 "Backend receive from: {f} failed: {t}",

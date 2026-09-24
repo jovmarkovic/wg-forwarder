@@ -73,4 +73,10 @@ pub const SwitcherState = struct {
         if (self.state.cmpxchgStrong(.running, .paused, .release, .monotonic) == null)
             io.futexWake(State, &self.state.raw, 1);
     }
+
+    /// Start a switcher timer if it's in `paused` state
+    pub fn timerStart(self: *Self, io: std.Io) void {
+        if (self.state.cmpxchgStrong(.paused, .running, .release, .monotonic) == null)
+            io.futexWake(SwitcherState.State, &self.state.raw, 1);
+    }
 };
