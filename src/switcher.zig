@@ -14,25 +14,33 @@ pub const SwitcherState = struct {
     };
     pub const Status = struct { running: bool, paused: bool, idle_timeout: ?i64 };
 
-    // Fields required for init
+    const State = enum(u32) {
+        running,
+        stopped,
+        paused,
+    };
+    const Wake = enum { expired, interrupted, exit };
+
+    /// Fields required for init
     io: std.Io,
     endpoints: *EndpointPool,
-    // Locking
+
+    /// Switcher internal running state
+    state: std.atomic.Value(State) = .init(.stopped),
+    /// Failover state if no packets arrived after a switch
+    failvover: std.atomic.Value(bool) = .init(false),
+    /// Locking
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
 
-    // Controls; manipulated by mutex
+    /// Controls; manipulated by mutex
     is_running: bool = false,
     is_paused: bool = false,
     wake_requested: bool = false,
 
-    // Thread handle to allow re-spawning
+    /// Thread handle to allow re-spawning
     thread: ?std.Thread = null,
 
-    /// Timestamp of an oldest packet arrived from the client before a reply
-    first_send_at: std.atomic.Value(i64) = .init(0),
-    /// Timestamp of a packet arrived from the endpoint
-    last_reply_at: std.atomic.Value(i64) = .init(0),
     /// Can be null if the thread is not running.
     /// Silence from the current endpoint that means "dead". Tied to PersistentKeepalive cadence.
     idle_timeout: ?i64,
@@ -54,62 +62,38 @@ pub const SwitcherState = struct {
 
     /// Switcher function
     pub fn run(self: *Self) void {
-        var failing_over = false;
-        // Reset packet timestamps
-        self.first_send_at.store(nowMs(self.io), .monotonic);
-        self.last_reply_at.store(nowMs(self.io), .monotonic);
-
         while (true) {
             // Blocks while paused; null means exit. One lock, one snapshot.
             const idle = self.threadHandler() orelse break;
 
-            const first_send = self.first_send_at.load(.monotonic);
-            const last_reply = self.last_reply_at.load(.monotonic);
+            const duration: i64 = if (self.failvover.load(.monotonic)) self.probe_interval else idle;
+            const dur_ms: i64 = duration * std.time.ms_per_s;
+            const deadline: i64 = nowMs(self.io) + dur_ms;
 
-            const duration = if (failing_over) self.probe_interval else idle;
-            const dur_ms = duration * std.time.ms_per_s;
-            std.log.debug("switcher: dur_ms={d}ms first_send={d}ms last_reply={d}ms", .{
-                dur_ms, first_send, last_reply,
-            });
-
-            const now = nowMs(self.io);
-            // Only judge the endpoint if we've spoken to it since it last spoke to us.
-            if (first_send > last_reply) {
-                const deadline: i64 = first_send + dur_ms;
-                // If deadline is not met, sleep for the reamainder
-                if (now < deadline) {
-                    if (!self.waitUntil(deadline)) break;
-                    continue;
-                }
-
-                const fo = self.endpoints.failoverToNext(self.io, now);
-                if (fo.selected) |e| {
-                    if (fo.changed) {
-                        std.log.info("Switched to {d} address: {f} health: {t}", .{
-                            e.index, e.endpoint.addr, e.endpoint.health,
-                        });
-                    } else {
-                        std.log.warn(
-                            "switcher: no alternative endpoint available, retrying {f}",
-                            .{e.endpoint.addr},
-                        );
-                    }
-                } else {
-                    std.log.warn("switcher: endpoint pool is empty", .{});
-                }
-                // give the new endpoint a fresh window
-                self.last_reply_at.store(now, .monotonic);
-                failing_over = true;
-
-                // If packed had arrived in time mark the connection as good.
-            } else if (first_send < last_reply) {
-                self.endpoints.markCurrentGood(self.io);
-                failing_over = false;
+            switch (self.waitUntil(deadline)) {
+                .exit => return,
+                .interrupted => continue, // Somehow go to the start of the main loop
+                .expired => {},
             }
 
-            // create a new deadline with fresh timestamp after the blocking functions
-            const deadline = dur_ms + nowMs(self.io);
-            if (!self.waitUntil(deadline)) break;
+            const now: i64 = nowMs(self.io);
+            const fo = self.endpoints.failoverToNext(self.io, now);
+            if (fo.selected) |e| {
+                if (fo.changed) {
+                    std.log.info("Switched to {d} address: {f} health: {t}", .{
+                        e.index, e.endpoint.addr, e.endpoint.health,
+                    });
+                } else {
+                    std.log.warn(
+                        "switcher: no alternative endpoint available, retrying {f}",
+                        .{e.endpoint.addr},
+                    );
+                }
+                // Start failover after the change
+                self.failvover.store(true, .monotonic);
+            } else {
+                std.log.warn("switcher: endpoint pool is empty", .{});
+            }
         }
     }
 
@@ -132,7 +116,7 @@ pub const SwitcherState = struct {
         // A live handle and a running flag are set and cleared together.
         std.debug.assert((self.thread != null) == self.is_running);
 
-        if (self.is_running and self.thread != null) {
+        if (self.is_running and self.thread != null and self.state.load(.monotonic) != .stopped) {
             if (!self.is_paused) return .already_running;
 
             self.is_paused = false;
@@ -145,7 +129,11 @@ pub const SwitcherState = struct {
 
         //set the states
         self.is_running = true;
-        errdefer self.is_running = false;
+        self.state.store(.paused, .release); // Start in a paused sate, not to trigger a timer
+        errdefer {
+            self.is_running = false;
+            self.state.store(.stopped, .release);
+        }
         self.is_paused = false;
         self.wake_requested = false;
 
@@ -161,6 +149,7 @@ pub const SwitcherState = struct {
         {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            self.state.store(.stopped, .release);
 
             self.is_running = false;
             self.wake_requested = true;
@@ -176,9 +165,26 @@ pub const SwitcherState = struct {
     pub fn pause(self: *Self) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        self.state.store(.paused, .release);
         self.is_paused = true;
         self.wake_requested = true;
         self.cond.broadcast(self.io);
+    }
+
+    /// Reset switcher state and mark current endpoint as valid
+    /// Use in forwarder functions.
+    pub fn reset(self: *Self, io: std.Io) void {
+        self.endpoints.markCurrentGood();
+        self.failvover.store(false, .monotonic);
+        if (self.state.cmpxchgStrong(.running, .paused, .release, .monotonic) == null)
+            io.futexWake(State, &self.state.raw, 1);
+    }
+
+    /// Start a switcher timer if it's in `paused` state
+    /// Use in forwarder functions.
+    pub fn timerStart(self: *Self, io: std.Io) void {
+        if (self.state.cmpxchgStrong(.paused, .running, .release, .monotonic) == null)
+            io.futexWake(SwitcherState.State, &self.state.raw, 1);
     }
 
     /// Join a thread that exited on its own, so a stale handle can never block a
@@ -201,7 +207,7 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        while (self.is_paused and self.is_running) {
+        while (self.is_paused and self.is_running and self.state.load(.monotonic) == .paused) {
             self.cond.waitUncancelable(self.io, &self.mutex);
         }
         self.wake_requested = false; // don't leave a stale wake for the next waitFor
@@ -212,26 +218,30 @@ pub const SwitcherState = struct {
     /// Wait up to `deadline` timestamp in milliseconds.
     /// Waking early on any state change.
     /// Returns false if the switcher should exit.
-    fn waitUntil(self: *Self, deadline: i64) bool {
+    fn waitUntil(self: *Self, deadline: i64) Wake {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         // Return error.Tiemout based on a duration struct
         const t = timer(deadline);
 
-        while (self.is_running and !self.wake_requested) {
+        while (self.is_running and !self.wake_requested and self.state.load(.monotonic) == .running) {
             self.cond.waitTimeout(self.io, &self.mutex, t) catch |err| switch (err) {
-                error.Timeout => break,
+                error.Timeout => {
+                    // Reset wake_requested
+                    self.wake_requested = false;
+                    return .expired;
+                },
                 // For safety in case we switch to ther Io implementation
                 error.Canceled => {
                     self.is_running = false;
-                    break;
+                    return .exit;
                 },
             };
         }
         // Reset wake_requested
         self.wake_requested = false;
-        return self.is_running;
+        return if (self.is_running) .interrupted else .exit;
     }
 };
 

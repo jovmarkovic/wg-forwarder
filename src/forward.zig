@@ -28,15 +28,13 @@ pub fn wgToServer(
                 std.log.warn("wgToServer failed to get server endpoint!", .{});
                 continue;
             };
+
+            // Start switcher timer
+            switcher.timerStart(io);
             std.log.debug("Trying to send to {f}", .{endpoint});
-            if (std.Io.net.Socket.send(serv_sock, io, &endpoint, packet)) {
-                // Save a timestamp of the oldest sent package prior to the reply only
-                const reply = switcher.last_reply_at.load(.monotonic);
-                if (switcher.first_send_at.load(.monotonic) <= reply)
-                    switcher.first_send_at.store(nowMs(io), .monotonic);
-            } else |err| {
+            std.Io.net.Socket.send(serv_sock, io, &endpoint, packet) catch |err| {
                 std.log.err("Backend send to: {f} {t}", .{ endpoint, err });
-            }
+            };
         } else |err| {
             std.log.err("Backend receive from: {f} {t}", .{ wg_sock.address, err });
             return err;
@@ -70,12 +68,12 @@ pub fn serverToWg(
                 });
                 continue;
             }
-            if (std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet)) {
-                // Confirm packet came from the server
-                switcher.last_reply_at.store(nowMs(io), .monotonic);
-            } else |err| {
+
+            // Reset switcher state
+            switcher.reset(io);
+            std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet) catch |err| {
                 std.log.err("Backend send to: {f} {t}", .{ wg_addr, err });
-            }
+            };
         } else |err| {
             std.log.err("Backend receive from: {f} {t}", .{ serv_sock.address, err });
             return err;
