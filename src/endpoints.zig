@@ -27,9 +27,9 @@ pub const EndpointPool = struct {
         cursor: ?u32 = 0,
 
         /// Next live endpoint, or null when exhausted.
-        pub fn next(it: *Iterator, io: std.Io) ?Entry {
+        pub fn next(it: *Iterator) ?Entry {
             if (it.consumed == it.filled) {
-                it.refill(io);
+                it.refill();
                 if (it.filled == 0) return null;
             }
             const entry = it.buf[it.consumed];
@@ -38,13 +38,13 @@ pub const EndpointPool = struct {
         }
 
         /// Refill a buffer from a point where last batch stopped
-        fn refill(it: *Iterator, io: std.Io) void {
+        fn refill(it: *Iterator) void {
             it.filled = 0;
             it.consumed = 0;
             const start = it.cursor orelse return; // no lock taken when exhausted
 
-            it.pool.lock.lockSharedUncancelable(io);
-            defer it.pool.lock.unlockShared(io);
+            it.pool.lock.lockSharedUncancelable(it.pool.io);
+            defer it.pool.lock.unlockShared(it.pool.io);
 
             for (it.pool.slots.items[start..], start..) |slot, index| {
                 if (slot.endpoint) |e| {
@@ -65,6 +65,9 @@ pub const EndpointPool = struct {
         }
     };
 
+    /// Required to be set by a caller
+    io: std.Io,
+
     // fields; Everything below `lock` is guarded by it
     addr_family: std.Io.net.IpAddress.Family,
 
@@ -79,6 +82,12 @@ pub const EndpointPool = struct {
     free_head: u32 = free_end, // Holds last free slot index or free_end if nothing is free;
 
     live: usize = 0, // Occupied slot count. `slots.items.len` is the max value
+
+    /// Construct a pool bound to one `Io`. Every method uses this instance,
+    /// so callers never pass one in.
+    pub fn init(io: std.Io, family: std.Io.net.IpAddress.Family) EndpointPool {
+        return .{ .io = io, .addr_family = family };
+    }
 
     // public API — each takes the lock itself
 
@@ -101,17 +110,17 @@ pub const EndpointPool = struct {
     }
 
     /// Returns an address of the current active endpoint if it has it.
-    pub fn currentAddr(self: *Self, io: std.Io) ?std.Io.net.IpAddress {
-        self.lock.lockSharedUncancelable(io);
-        defer self.lock.unlockShared(io);
+    pub fn currentAddr(self: *Self) ?std.Io.net.IpAddress {
+        self.lock.lockSharedUncancelable(self.io);
+        defer self.lock.unlockShared(self.io);
         return self.current;
     }
 
     /// Return currently active Entry
-    pub fn currentEntry(self: *Self, io: std.Io) ?Entry {
+    pub fn currentEntry(self: *Self) ?Entry {
         // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(io);
-        defer self.lock.unlockShared(io);
+        self.lock.lockSharedUncancelable(self.io);
+        defer self.lock.unlockShared(self.io);
 
         const addr = self.current orelse return null;
         const i = self.indexOfUnsafe(addr, self.hint) orelse return null;
@@ -125,12 +134,12 @@ pub const EndpointPool = struct {
 
     /// Format one line per found endpoint into a writer starting at slot `start`.
     /// `find <ip:port>` — O(N), admin-triggered only. Skips free slots.
-    pub fn findByAddr(self: *Self, io: std.Io, w: *std.Io.Writer, addr: std.Io.net.IpAddress, start: u32) ?u32 {
+    pub fn findByAddr(self: *Self, w: *std.Io.Writer, addr: std.Io.net.IpAddress, start: u32) ?u32 {
         // Buffer size to be at least of a max_find_line is evaluated during comptime
         const max_line = max_find_line;
         // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(io);
-        defer self.lock.unlockShared(io);
+        self.lock.lockSharedUncancelable(self.io);
+        defer self.lock.unlockShared(self.io);
 
         for (self.slots.items[start..], start..) |slot, index| {
             if (slot.endpoint) |e|
@@ -147,12 +156,12 @@ pub const EndpointPool = struct {
 
     /// Format one line per live endpoint into a writer, starting at slot `start`.
     /// Returns the slot to resume from, or null at the end of a pool.
-    pub fn writePage(self: *Self, io: std.Io, w: *std.Io.Writer, start: u32) ?u32 {
+    pub fn writePage(self: *Self, w: *std.Io.Writer, start: u32) ?u32 {
         // Buffer size to be at least of a max_list_line is evaluated during comptime
         const max_line = max_list_line;
         // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(io);
-        defer self.lock.unlockShared(io);
+        self.lock.lockSharedUncancelable(self.io);
+        defer self.lock.unlockShared(self.io);
 
         for (self.slots.items[start..], start..) |slot, index| {
             if (slot.endpoint) |e| {
@@ -170,15 +179,14 @@ pub const EndpointPool = struct {
     /// Complies with address family selected at start.
     pub fn add(
         self: *Self,
-        io: std.Io,
         gpa: std.mem.Allocator,
         addr: std.Io.net.IpAddress,
     ) error{ Duplicate, OutOfMemory, WrongFamily }!u32 {
         // Check if address family matches first
         try matchFamily(addr, self.addr_family);
         // Using lockUncancelable for writing
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         // Checking duplicates after the lock to avoid racing erros
         if (self.indexOfUnsafe(addr, null) != null) return error.Duplicate;
         return try self.addUnsafe(gpa, addr);
@@ -186,9 +194,9 @@ pub const EndpointPool = struct {
 
     /// Make `address` the active endpoint. Pass an index as a hint for slot location.
     /// Returns false if points at a freed slot and `current` is left unchanged.
-    pub fn setCurrent(self: *Self, io: std.Io, hint: ?u32, addr: std.Io.net.IpAddress) bool {
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+    pub fn setCurrent(self: *Self, hint: ?u32, addr: std.Io.net.IpAddress) bool {
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
 
         const i = self.indexOfUnsafe(addr, hint) orelse return false;
         self.current = addr;
@@ -200,7 +208,6 @@ pub const EndpointPool = struct {
     /// resets health and last_failed_at state.
     pub fn edit(
         self: *Self,
-        io: std.Io,
         hint: ?u32,
         old: std.Io.net.IpAddress,
         new: std.Io.net.IpAddress,
@@ -209,8 +216,8 @@ pub const EndpointPool = struct {
         try matchFamily(new, self.addr_family);
 
         // Using lockUncancelable for potenital writing
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
 
         //Check if any address matches
         const index = self.indexOfUnsafe(old, hint) orelse return error.NotFound;
@@ -239,10 +246,10 @@ pub const EndpointPool = struct {
 
     /// Remove `address` as an endpoint. Pass an index as a hint for slot position.
     /// Returns null if no address is found after checking the whole pool.
-    pub fn removeByAddr(self: *Self, io: std.Io, hint: ?u32, addr: std.Io.net.IpAddress) ?Endpoint {
+    pub fn removeByAddr(self: *Self, hint: ?u32, addr: std.Io.net.IpAddress) ?Endpoint {
         // Using lockUncancelable for writing
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
 
         const index = self.indexOfUnsafe(addr, hint) orelse return null;
         const was_current = sameAddr(self.current, addr);
@@ -267,10 +274,10 @@ pub const EndpointPool = struct {
 
     /// Mark the active endpoint healthy.
     /// No-op if there is none or the handle is stale.
-    pub fn markCurrentGood(self: *Self, io: std.Io) void {
+    pub fn markCurrentGood(self: *Self) void {
         // Using lockUncancelable for writing
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
 
         const addr = self.current orelse return;
         const i = self.indexOfUnsafe(addr, self.hint) orelse return;
@@ -280,10 +287,10 @@ pub const EndpointPool = struct {
 
     /// Mark the current endpoint failed,
     /// then advance to the best candidate.
-    pub fn failoverToNext(self: *Self, io: std.Io, now: i64) Failover {
+    pub fn failoverToNext(self: *Self, now: i64) Failover {
         // Using lockUncancelable for writing
-        self.lock.lockUncancelable(io);
-        defer self.lock.unlock(io);
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
 
         // Check the pool size first
         if (self.slots.items.len == 0) {
@@ -507,7 +514,7 @@ const TestCtx = struct {
     pool: EndpointPool,
 
     fn init(family: std.Io.net.IpAddress.Family) TestCtx {
-        return .{ .pool = .{ .addr_family = family } };
+        return .{ .pool = .init(testing.io, family) };
     }
 
     fn deinit(self: *Self) void {
@@ -516,12 +523,12 @@ const TestCtx = struct {
 
     /// A loopback endpoint distinguished only by port. Returns its slot index.
     fn add(self: *Self, port: u16) !u32 {
-        return self.pool.add(testing.io, testing.allocator, addr4(port));
+        return self.pool.add(testing.allocator, addr4(port));
     }
 
     fn addV6(self: *Self, port: u16) !u32 {
         const a = std.Io.net.IpAddress.parse("::1", port) catch unreachable;
-        return self.pool.add(testing.io, testing.allocator, a);
+        return self.pool.add(testing.allocator, a);
     }
 
     /// Reach past the API to set health directly mimicking switcher's inputs.
@@ -588,7 +595,7 @@ test "add: duplicate check" {
     try testing.expectError(error.Duplicate, t.add(1001));
 
     _ = try t.add(1002);
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1001));
+    _ = t.pool.removeByAddr(0, addr4(1001));
 
     // No longer a duplicate; slot and the address are both free again.
     try testing.expectEqual(@as(u32, 0), try t.add(1001));
@@ -607,7 +614,7 @@ test "findByAddr: reports the matching slot and nothing else" {
 
     var page: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.findByAddr(testing.io, &writer, addr4(1002), 0) == null);
+    try testing.expect(t.pool.findByAddr(&writer, addr4(1002), 0) == null);
 
     try testing.expectEqualStrings(
         "Found address: 127.0.0.1:1002 at slot: 1 health: untried\n",
@@ -622,7 +629,7 @@ test "findByAddr: no match writes nothing" {
 
     var page: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.findByAddr(testing.io, &writer, addr4(9999), 0) == null);
+    try testing.expect(t.pool.findByAddr(&writer, addr4(9999), 0) == null);
     try testing.expectEqual(0, writer.end);
 }
 
@@ -631,11 +638,11 @@ test "findByAddr: a hole is not a match" {
     defer t.deinit();
 
     _ = try t.add(1001);
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1001));
+    _ = t.pool.removeByAddr(0, addr4(1001));
 
     var page: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.findByAddr(testing.io, &writer, addr4(1001), 0) == null);
+    try testing.expect(t.pool.findByAddr(&writer, addr4(1001), 0) == null);
     try testing.expectEqual(0, writer.end);
 }
 
@@ -646,11 +653,11 @@ test "findByAddr: forward only scan" {
 
     var page: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.findByAddr(testing.io, &writer, addr4(1000), 2) == null);
+    try testing.expect(t.pool.findByAddr(&writer, addr4(1000), 2) == null);
     try testing.expectEqual(0, writer.end);
 
     writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.findByAddr(testing.io, &writer, addr4(1003), 2) == null);
+    try testing.expect(t.pool.findByAddr(&writer, addr4(1003), 2) == null);
     try testing.expect(std.mem.find(u8, writer.buffer[0..writer.end], "127.0.0.1:1003") != null);
 }
 
@@ -663,7 +670,7 @@ test "edit: replaces the address in place, keeping the slot" {
     for (0..3) |k| _ = try t.add(@intCast(1000 + k));
     const len_before = t.pool.slots.items.len;
 
-    _ = try t.pool.edit(testing.io, null, addr4(1001), addr4(2001));
+    _ = try t.pool.edit(null, addr4(1001), addr4(2001));
 
     // An edit is not a remove-then-add; same slot, no growth, free list never touched.
     try testing.expectEqual(@as(?u32, 1), t.pool.indexOfUnsafe(addr4(2001), null));
@@ -681,7 +688,7 @@ test "edit: returns the previous state and resets health" {
     const i = try t.add(1000);
     t.setHealth(i, .failed, 4242);
 
-    const old = try t.pool.edit(testing.io, null, addr4(1000), addr4(2000));
+    const old = try t.pool.edit(null, addr4(1000), addr4(2000));
 
     // What comes back is the endpoint as it was, so the console can report it.
     try testing.expectEqual(@as(u16, 1000), old.addr.ip4.port);
@@ -702,11 +709,11 @@ test "edit: editing the current endpoint moves `current` and `hint` with it" {
 
     _ = try t.add(1000);
     const i = try t.add(1001);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
 
-    _ = try t.pool.edit(testing.io, null, addr4(1001), addr4(2001));
+    _ = try t.pool.edit(null, addr4(1001), addr4(2001));
 
-    const cur = t.pool.currentAddr(testing.io) orelse return error.TestExpectedCurrent;
+    const cur = t.pool.currentAddr() orelse return error.TestExpectedCurrent;
     try testing.expectEqual(@as(u16, 2001), cur.ip4.port);
     try testing.expectEqual(@as(?u32, i), t.pool.hint);
     try expectInvariants(&t.pool);
@@ -718,11 +725,11 @@ test "edit: editing a non-current endpoint leaves current alone" {
 
     _ = try t.add(1000);
     _ = try t.add(1001);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1000)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1000)));
 
-    _ = try t.pool.edit(testing.io, null, addr4(1001), addr4(2001));
+    _ = try t.pool.edit(null, addr4(1001), addr4(2001));
 
-    const cur = t.pool.currentAddr(testing.io) orelse return error.TestExpectedCurrent;
+    const cur = t.pool.currentAddr() orelse return error.TestExpectedCurrent;
     try testing.expectEqual(@as(u16, 1000), cur.ip4.port);
     try expectInvariants(&t.pool);
 }
@@ -734,7 +741,7 @@ test "edit: self-edit resets health and last_failed_at" {
     const i = try t.add(1000);
     t.setHealth(i, .failed, 99);
 
-    const old = try t.pool.edit(testing.io, null, addr4(1000), addr4(1000));
+    const old = try t.pool.edit(null, addr4(1000), addr4(1000));
     try testing.expectEqual(EndpointPool.Health.failed, old.health);
 
     const now = t.pool.atUnsafe(i).?;
@@ -752,12 +759,12 @@ test "removeByAddr: the hint follows the successor" {
     defer t.deinit();
 
     for (0..3) |k| _ = try t.add(@intCast(1000 + k));
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1000)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1000)));
     try testing.expectEqual(@as(?u32, 0), t.pool.hint);
 
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1000));
+    _ = t.pool.removeByAddr(0, addr4(1000));
 
-    const cur = t.pool.currentEntry(testing.io) orelse return error.TestExpectedCurrent;
+    const cur = t.pool.currentEntry() orelse return error.TestExpectedCurrent;
     try testing.expectEqual(@as(?u32, cur.index), t.pool.hint);
     try expectInvariants(&t.pool);
 }
@@ -767,11 +774,11 @@ test "removeByAddr: removing the only endpoint leaves no current" {
     defer t.deinit();
 
     _ = try t.add(1001);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
-    try testing.expect(t.pool.removeByAddr(testing.io, 0, addr4(1001)) != null);
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
+    try testing.expect(t.pool.removeByAddr(0, addr4(1001)) != null);
 
     try testing.expect(t.pool.current == null);
-    try testing.expect(t.pool.currentAddr(testing.io) == null);
+    try testing.expect(t.pool.currentAddr() == null);
     try testing.expectEqual(0, t.pool.live);
     try expectInvariants(&t.pool);
 }
@@ -782,8 +789,8 @@ test "removeByAddr: removing a non-current endpoint leaves current alone" {
 
     _ = try t.add(1001);
     _ = try t.add(1002);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
+    _ = t.pool.removeByAddr(0, addr4(1002));
 
     try testing.expect(EndpointPool.sameAddr(t.pool.current, addr4(1001)));
     try expectInvariants(&t.pool);
@@ -816,8 +823,8 @@ test "free list: LIFO reuse before growing the array" {
     _ = try t.add(1002);
     _ = try t.add(1003);
 
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1001)); // chain: 1
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002)); // chain: 2 -> 1
+    _ = t.pool.removeByAddr(0, addr4(1001)); // chain: 1
+    _ = t.pool.removeByAddr(0, addr4(1002)); // chain: 2 -> 1
     try expectInvariants(&t.pool);
 
     try testing.expectEqual(@as(u32, 2), try t.add(2000)); // most recently freed
@@ -839,7 +846,7 @@ test "free list: five removals and five additions reuse the same slots in revers
 
     // Each removal pushes onto the head, the chain ends 4 -> 3 -> 2 -> 1 -> 0.
     for (0..5) |k| {
-        try testing.expect(t.pool.removeByAddr(testing.io, 0, addr4(@intCast(1000 + k))) != null);
+        try testing.expect(t.pool.removeByAddr(0, addr4(@intCast(1000 + k))) != null);
         try testing.expectEqual(@as(u32, @intCast(k)), t.pool.free_head);
         try expectInvariants(&t.pool);
     }
@@ -867,7 +874,7 @@ test "free list: remove, edit and refill in rounds keep every invariant" {
     // round every endpoint is one generation newer and the array has not grown.
     // Free list handed back exactly what was released.
     for (0..16) |k| _ = try t.add(@intCast(3000 + k));
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(3015)));
+    try testing.expect(t.pool.setCurrent(null, addr4(3015)));
 
     var gen: u16 = 3000;
     for (0..3) |_| {
@@ -876,7 +883,7 @@ test "free list: remove, edit and refill in rounds keep every invariant" {
         // Release the evens.
         var k: u16 = 0;
         while (k < 16) : (k += 2) {
-            try testing.expect(t.pool.removeByAddr(testing.io, null, addr4(gen + k)) != null);
+            try testing.expect(t.pool.removeByAddr(null, addr4(gen + k)) != null);
             try expectInvariants(&t.pool);
         }
         try testing.expectEqual(8, t.pool.live);
@@ -888,7 +895,7 @@ test "free list: remove, edit and refill in rounds keep every invariant" {
         // generations at the end.
         k = 1;
         while (k < 16) : (k += 2) {
-            _ = try t.pool.edit(testing.io, null, addr4(gen + k), addr4(next + k));
+            _ = try t.pool.edit(null, addr4(gen + k), addr4(next + k));
             try expectInvariants(&t.pool);
         }
         // An edit reuses its own slot, so it must not have disturbed the chain.
@@ -914,7 +921,7 @@ test "free list: remove, edit and refill in rounds keep every invariant" {
     for (0..16) |k| try testing.expect(t.pool.indexOfUnsafe(addr4(@intCast(6000 + k)), null) != null);
 
     // `current` followed its endpoint through all three edits.
-    const cur = t.pool.currentAddr(testing.io) orelse return error.TestExpectedCurrent;
+    const cur = t.pool.currentAddr() orelse return error.TestExpectedCurrent;
     try testing.expectEqual(@as(u16, 6015), cur.ip4.port);
 }
 
@@ -935,13 +942,13 @@ test "free list: functions on error do not cause changes in the pool" {
     try testing.expectError(error.Duplicate, t.add(1001));
     try testing.expectError(error.WrongFamily, t.addV6(1002));
 
-    try testing.expectError(error.NotFound, t.pool.edit(testing.io, null, addr4(9999), addr4(2001)));
-    try testing.expectError(error.Duplicate, t.pool.edit(testing.io, null, addr4(1001), addr4(1002)));
-    try testing.expectError(error.WrongFamily, t.pool.edit(testing.io, null, addr4(1001), v6));
+    try testing.expectError(error.NotFound, t.pool.edit(null, addr4(9999), addr4(2001)));
+    try testing.expectError(error.Duplicate, t.pool.edit(null, addr4(1001), addr4(1002)));
+    try testing.expectError(error.WrongFamily, t.pool.edit(null, addr4(1001), v6));
 
     // The two that report absence by value rather than by error.
-    try testing.expect(!t.pool.setCurrent(testing.io, null, addr4(9999)));
-    try testing.expect(t.pool.removeByAddr(testing.io, null, addr4(9999)) == null);
+    try testing.expect(!t.pool.setCurrent(null, addr4(9999)));
+    try testing.expect(t.pool.removeByAddr(null, addr4(9999)) == null);
 
     try testing.expectEqual(live_before, t.pool.live);
     try testing.expectEqual(len_before, t.pool.slots.items.len);
@@ -956,9 +963,9 @@ test "free list: functions on error do not cause changes in the pool" {
 
     try testing.expectError(error.Duplicate, t.add(1001));
     try testing.expectError(error.WrongFamily, t.addV6(1002));
-    try testing.expectError(error.NotFound, t.pool.edit(testing.io, null, addr4(1003), addr4(2003)));
-    try testing.expectError(error.Duplicate, t.pool.edit(testing.io, null, addr4(1001), addr4(1002)));
-    try testing.expectError(error.WrongFamily, t.pool.edit(testing.io, null, addr4(1001), v6));
+    try testing.expectError(error.NotFound, t.pool.edit(null, addr4(1003), addr4(2003)));
+    try testing.expectError(error.Duplicate, t.pool.edit(null, addr4(1001), addr4(1002)));
+    try testing.expectError(error.WrongFamily, t.pool.edit(null, addr4(1001), v6));
 
     // Removed slot is untouched.
     try testing.expectEqual(2, t.pool.live);
@@ -977,7 +984,7 @@ test "indexOfUnsafe: a wrong hint is invisible in the result" {
     defer t.deinit();
 
     for (0..6) |k| _ = try t.add(@intCast(1000 + k));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002)); // a hole to trip over
+    _ = t.pool.removeByAddr(0, addr4(1002)); // a hole to trip over
 
     for ([_]u16{ 1000, 1001, 1003, 1004, 1005 }) |port| {
         const truth = t.pool.indexOfUnsafe(addr4(port), null);
@@ -1004,16 +1011,16 @@ test "setCurrent: accepts a live address and rejects an absent one" {
     _ = try t.add(1001);
     _ = try t.add(1002);
 
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
     try testing.expect(EndpointPool.sameAddr(t.pool.current, addr4(1001)));
 
     // Absent address: rejected, and `current` is left alone.
-    try testing.expect(!t.pool.setCurrent(testing.io, null, addr4(9999)));
+    try testing.expect(!t.pool.setCurrent(null, addr4(9999)));
     try testing.expect(EndpointPool.sameAddr(t.pool.current, addr4(1001)));
 
     // Freed slot: also rejected.
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002));
-    try testing.expect(!t.pool.setCurrent(testing.io, null, addr4(1002)));
+    _ = t.pool.removeByAddr(0, addr4(1002));
+    try testing.expect(!t.pool.setCurrent(null, addr4(1002)));
     try testing.expect(EndpointPool.sameAddr(t.pool.current, addr4(1001)));
     try expectInvariants(&t.pool);
 }
@@ -1022,14 +1029,14 @@ test "currentAddr/currentEntry: null on an empty pool" {
     var t: TestCtx = .init(.ip4);
     defer t.deinit();
 
-    try testing.expect(t.pool.currentAddr(testing.io) == null);
-    try testing.expect(t.pool.currentEntry(testing.io) == null);
+    try testing.expect(t.pool.currentAddr() == null);
+    try testing.expect(t.pool.currentEntry() == null);
 
     const i = try t.add(1001);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
 
-    const addr = t.pool.currentAddr(testing.io).?;
-    const entry = t.pool.currentEntry(testing.io).?;
+    const addr = t.pool.currentAddr().?;
+    const entry = t.pool.currentEntry().?;
     try testing.expectEqual(i, entry.index);
     try testing.expect(std.Io.net.IpAddress.eql(&addr, &entry.endpoint.addr));
 }
@@ -1107,7 +1114,7 @@ test "nextCandidate: holes are skipped, not selected" {
     const a = try t.add(1001);
     _ = try t.add(1002);
     const d = try t.add(1003);
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002));
+    _ = t.pool.removeByAddr(0, addr4(1002));
 
     const picked = t.pool.nextCandidateUnsafe(a, 0).?;
     try testing.expectEqual(d, picked);
@@ -1122,9 +1129,9 @@ test "failoverToNext: marks the previous endpoint failed with the given timestam
 
     const a = try t.add(1001);
     _ = try t.add(1002);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
 
-    _ = t.pool.failoverToNext(testing.io, 1234);
+    _ = t.pool.failoverToNext(1234);
 
     const failed = t.pool.atUnsafe(a).?;
     try testing.expectEqual(EndpointPool.Health.failed, failed.health);
@@ -1138,7 +1145,7 @@ test "failoverToNext: no current selected still picks a candidate" {
     for (0..3) |k| _ = try t.add(@intCast(1000 + k));
     try testing.expect(t.pool.current == null);
 
-    const fo = t.pool.failoverToNext(testing.io, 10);
+    const fo = t.pool.failoverToNext(10);
     try testing.expect(fo.changed); // null -> something is a change
     try testing.expect(fo.selected != null);
     try testing.expect(t.pool.current != null);
@@ -1149,7 +1156,7 @@ test "failoverToNext: empty pool selects nothing and reports no change" {
     var t: TestCtx = .init(.ip4);
     defer t.deinit();
 
-    const fo = t.pool.failoverToNext(testing.io, 10);
+    const fo = t.pool.failoverToNext(10);
     try testing.expect(fo.selected == null);
     try testing.expect(!fo.changed);
     try testing.expect(t.pool.current == null);
@@ -1160,10 +1167,10 @@ test "failoverToNext: a pool of only holes clears current instead of dangling" {
     defer t.deinit();
 
     _ = try t.add(1001);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
     _ = t.pool.removeUnsafe(0); // free the slot behind current's back
 
-    const fo = t.pool.failoverToNext(testing.io, 10);
+    const fo = t.pool.failoverToNext(10);
     try testing.expect(fo.selected == null);
     try testing.expect(t.pool.current == null);
 }
@@ -1174,8 +1181,8 @@ test "markCurrentGood: touches just the current endpoint" {
 
     const a = try t.add(1001);
     const b = try t.add(1002);
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1001)));
-    t.pool.markCurrentGood(testing.io);
+    try testing.expect(t.pool.setCurrent(null, addr4(1001)));
+    t.pool.markCurrentGood();
 
     try testing.expectEqual(EndpointPool.Health.good, t.pool.atUnsafe(a).?.health);
     try testing.expectEqual(EndpointPool.Health.untried, t.pool.atUnsafe(b).?.health);
@@ -1185,7 +1192,7 @@ test "markCurrentGood: no current selected is a no-op" {
     var t: TestCtx = .init(.ip4);
     defer t.deinit();
     _ = try t.add(1001);
-    t.pool.markCurrentGood(testing.io); // must not panic
+    t.pool.markCurrentGood(); // must not panic
     try testing.expectEqual(EndpointPool.Health.untried, t.pool.atUnsafe(0).?.health);
 }
 
@@ -1194,10 +1201,10 @@ test "markCurrentGood: set a hint to current" {
     defer t.deinit();
 
     for (0..4) |k| _ = try t.add(@intCast(1000 + k));
-    try testing.expect(t.pool.setCurrent(testing.io, null, addr4(1002)));
+    try testing.expect(t.pool.setCurrent(null, addr4(1002)));
 
     t.pool.hint = 0; // as if something moved underneath it
-    t.pool.markCurrentGood(testing.io);
+    t.pool.markCurrentGood();
 
     try testing.expectEqual(@as(?u32, 2), t.pool.hint);
     try testing.expectEqual(EndpointPool.Health.good, t.pool.atUnsafe(2).?.health);
@@ -1259,7 +1266,7 @@ fn collectPages(t: *TestCtx, page_buf: []u8, out: *std.ArrayList(u8)) !usize {
     var start: ?u32 = 0;
     while (start) |s| {
         var writer = std.Io.Writer.fixed(page_buf);
-        start = t.pool.writePage(testing.io, &writer, s);
+        start = t.pool.writePage(&writer, s);
         try out.appendSlice(testing.allocator, writer.buffer[0..writer.end]);
         pages += 1;
         try testing.expect(pages <= 4096); // livelock guard
@@ -1274,7 +1281,7 @@ test "writePage: exact output for a pool with a hole" {
     const a = try t.add(1001);
     _ = try t.add(1002);
     _ = try t.add(1003);
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1002));
+    _ = t.pool.removeByAddr(0, addr4(1002));
     t.setHealth(a, .good, 0);
 
     var page: [512]u8 = undefined;
@@ -1295,9 +1302,9 @@ test "writePage: a one-line buffer still yields every endpoint exactly once" {
 
     for (0..10) |k| _ = try t.add(@intCast(1000 + k));
     // Holes at both ends of the range and in the middle.
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1000));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1004));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1009));
+    _ = t.pool.removeByAddr(0, addr4(1000));
+    _ = t.pool.removeByAddr(0, addr4(1004));
+    _ = t.pool.removeByAddr(0, addr4(1009));
 
     // Exactly the worst-case line, so at most one line fits per page: every
     // remaining endpoint costs a separate resume.
@@ -1373,13 +1380,13 @@ test "iterate yields every live endpoint exactly once across page boundaries" {
     // page_len + 5 forces two refills, and the holes exercise the skip path.
     const n = EndpointPool.Iterator.page_len + 5;
     for (0..n) |k| _ = try t.add(@intCast(1000 + k));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1003));
-    _ = t.pool.removeByAddr(testing.io, 0, addr4(1020));
+    _ = t.pool.removeByAddr(0, addr4(1003));
+    _ = t.pool.removeByAddr(0, addr4(1020));
 
     var seen: usize = 0;
     var last: i64 = -1;
     var it = t.pool.iterate();
-    while (it.next(testing.io)) |entry| {
+    while (it.next()) |entry| {
         // Strictly increasing: catches a refill that restarts from slot 0.
         try testing.expect(@as(i64, entry.index) > last);
         last = entry.index;
@@ -1395,7 +1402,7 @@ test "iterate over an empty pool yields nothing" {
     defer t.deinit();
 
     var it = t.pool.iterate();
-    try testing.expect(it.next(testing.io) == null);
+    try testing.expect(it.next() == null);
 }
 
 // additional coverage
@@ -1407,7 +1414,7 @@ test "writePage resumes from a non-zero start" {
 
     var page: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&page);
-    try testing.expect(t.pool.writePage(testing.io, &writer, 2) == null);
+    try testing.expect(t.pool.writePage(&writer, 2) == null);
 
     try testing.expectEqualStrings(
         "Address: 127.0.0.1:1002 slot: 2 health: untried\n" ++
@@ -1490,7 +1497,7 @@ test "dumpFreeChain: three removals leave three links, not three dangling slots"
 
     // Non-adjacent removals, to show the chain has nothing to do with adjacency.
     for ([_]u16{ 1006, 1001, 1004 }) |port| {
-        _ = t.pool.removeByAddr(testing.io, 0, addr4(port));
+        _ = t.pool.removeByAddr(0, addr4(port));
         if (show_dumps) {
             var label: [40]u8 = undefined;
             dumpToStderr(&t.pool, std.fmt.bufPrint(&label, "after rm {d}:", .{port}) catch "after rm:");

@@ -391,7 +391,7 @@ fn handleSwitcher(
         \\  play            - Resume/start the switcher thread
         \\  pause           - Suspend the switcher thread
         \\  stop            - Fully stop the switcher thread
-        \\  timer           - Set timer duration for siwtcher thread
+        \\  timer           - Set timer duration for switcher thread
         \\  endpoint        - Interactively manage endpoint
         \\  return (ret)    - Return to global session state
         \\  exit/quit (q)   - Close the admin connection
@@ -448,21 +448,21 @@ fn showStatus(
     endpoints: *EndpointPool,
 ) void {
     const st = switcher.status();
-    const state_str = if (!st.running) "DEAD" else if (st.paused) "PAUSED" else "RUNNING";
-    const timer = st.idle_timeout orelse 0;
+    const state_str = if (!st.thread_running) "DEAD" else if (st.admin_paused) "PAUSED" else "RUNNING";
+    const timer = st.idle_timeout;
 
-    const entry = endpoints.currentEntry(io);
+    const entry = endpoints.currentEntry();
 
     const msg = if (entry) |e|
         std.fmt.bufPrint(
             msg_buf,
-            "Switcher: {s} timer: {d}s\nCurrent slot: {d} address: {f} health: {t}\n",
+            "Switcher: {s} timer: {?d}s\nCurrent slot: {d} address: {f} health: {t}\n",
             .{ state_str, timer, e.index, e.endpoint.addr, e.endpoint.health },
         ) catch "Status line too long for the reply buffer.\n"
     else
         std.fmt.bufPrint(
             msg_buf,
-            "Switcher: {s} timer: {d}s\nNo current endpoint.\n",
+            "Switcher: {s} timer: {?d}s\nNo current endpoint.\n",
             .{ state_str, timer },
         ) catch "Status line too long for the reply buffer.\n";
 
@@ -481,7 +481,7 @@ fn listEndpoints(
     var found = false;
     while (start) |s| {
         var w = std.Io.Writer.fixed(msg_buf);
-        start = endpoints.writePage(io, &w, s);
+        start = endpoints.writePage(&w, s);
         if (w.end > 0) {
             found = true;
             reply(io, conn, w.buffer[0..w.end]); // one send per page, outside the lock
@@ -513,7 +513,7 @@ fn endpointAdd(
         ) orelse continue;
 
         // Using current len and adding an item to array creates a valid ID
-        const id = endpoints.add(io, gpa, addr) catch |err| {
+        const id = endpoints.add(gpa, addr) catch |err| {
             const msg = std.fmt.bufPrint(msg_buf, "Error adding: {s} {s}", .{
                 full_addr,
                 addErrorText(err),
@@ -555,7 +555,7 @@ fn endpointFindAddr(
     var start: ?u32 = 0;
     while (start) |s| {
         var w = std.Io.Writer.fixed(msg_buf);
-        start = endpoints.findByAddr(io, &w, addr, s);
+        start = endpoints.findByAddr(&w, addr, s);
         if (w.end > 0) {
             found = true;
             reply(io, conn, w.buffer[0..w.end]);
@@ -590,7 +590,6 @@ fn endpointEdit(
     ) orelse return;
 
     const old = endpoints.edit(
-        io,
         target.hint,
         target.addrs[0],
         target.addrs[1],
@@ -629,7 +628,7 @@ fn endpointSet(
         usage,
     ) orelse return;
 
-    const endpoint = endpoints.setCurrent(io, target.hint, target.addrs[0]);
+    const endpoint = endpoints.setCurrent(target.hint, target.addrs[0]);
 
     if (endpoint) {
         const msg = std.fmt.bufPrint(msg_buf, "Active endpoint: {f}.\n", .{
@@ -666,7 +665,7 @@ fn endpointRemove(
         usage,
     ) orelse return;
 
-    if (endpoints.removeByAddr(io, target.hint, target.addrs[0])) |ep| {
+    if (endpoints.removeByAddr(target.hint, target.addrs[0])) |ep| {
         const msg = std.fmt.bufPrint(
             msg_buf,
             "Removed endpoint: {f}.\n",

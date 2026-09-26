@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Format read endpoints
-    var endpoints: EndpointPool = .{ .addr_family = config.address_family };
+    var endpoints: EndpointPool = .init(io, config.address_family);
     defer endpoints.deinit(alloc);
 
     var bad_addr = false;
@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             bad_addr = true;
             continue;
         };
-        const id = endpoints.add(io, alloc, addr) catch |err| switch (err) {
+        const id = endpoints.add(alloc, addr) catch |err| switch (err) {
             error.WrongFamily => {
                 std.log.err("config: switcher.endpoints[{d}] = \"{s}\" is not {t}", .{
                     idx, ep, config.address_family,
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             },
             else => return err,
         };
-        if (idx == config.switcher.id) _ = endpoints.setCurrent(io, id, addr);
+        if (idx == config.switcher.id) _ = endpoints.setCurrent(id, addr);
     }
     if (bad_addr) return error.InvalidConfig;
 
@@ -153,13 +153,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .protocol = .udp,
     });
 
-    // Siwtcher struct holds all atomics
+    // Switcher struct owns all shared switcher state
     var switcher: SwitcherState = .{
         .io = io,
         .idle_timeout = if (config.switcher.timer) |t| t else null,
         .endpoints = &endpoints,
     };
-    // Deffering stop to run after joining other threads
+    // Deferring stop to run after joining other threads
     defer switcher.stop();
 
     var admin_server: ?std.Thread = null;

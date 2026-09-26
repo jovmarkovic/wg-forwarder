@@ -24,13 +24,13 @@ pub fn wgToServer(
                 continue;
             }
 
-            const endpoint = endpoints.currentAddr(io) orelse {
+            const endpoint = endpoints.currentAddr() orelse {
                 std.log.warn("wgToServer failed to get server endpoint!", .{});
                 continue;
             };
 
-            // Start switcher timer
-            switcher.timerStart(io);
+            // Guard against keepalive from the client
+            if (packet.len > 32) switcher.timerStart();
             std.log.debug("Trying to send to {f}", .{endpoint});
             std.Io.net.Socket.send(serv_sock, io, &endpoint, packet) catch |err| {
                 std.log.err("Backend send to: {f} {t}", .{ endpoint, err });
@@ -58,7 +58,7 @@ pub fn serverToWg(
             const addr = recv.from;
             std.log.debug("Received {d} bytes, server: {f}", .{ recv.data.len, addr });
             const packet = srv_buf[0..recv.data.len];
-            const endpoint = endpoints.currentAddr(io) orelse {
+            const endpoint = endpoints.currentAddr() orelse {
                 std.log.warn("serverToWg failed to get server endpoint!", .{});
                 continue;
             };
@@ -70,7 +70,7 @@ pub fn serverToWg(
             }
 
             // Reset switcher state
-            switcher.reset(io);
+            switcher.reset();
             std.Io.net.Socket.send(wg_sock, io, &wg_addr, packet) catch |err| {
                 std.log.err("Backend send to: {f} {t}", .{ wg_addr, err });
             };

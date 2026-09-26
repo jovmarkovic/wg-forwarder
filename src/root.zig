@@ -1,5 +1,5 @@
 const std = @import("std");
-const _zls_main = @import("main.zig"); // for ZLS referece searches
+const _zls_main = @import("main.zig"); // for ZLS reference searches
 
 pub const parser = @import("parser.zig");
 pub const forward = @import("forward.zig");
