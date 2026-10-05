@@ -4,32 +4,62 @@ const nowMs = @import("timestamp.zig").nowMs;
 const timer = @import("timestamp.zig").timer;
 
 pub const SwitcherState = struct {
+    /// SwitcherState
     const Self = @This();
 
-    /// Return values of startOrPlay() function
+    /// Return values of startOrPlay() function.
     pub const PlayOutcome = enum {
         started,
         resumed,
         already_running,
     };
+    /// Holds a status managed by `startOrPlay()`, `pause()` and `setDuration()` admin functions.
     pub const Status = struct { thread_running: bool, admin_paused: bool, idle_timeout: ?i64 };
 
-    const Tag = enum { running, paused, stopped };
+    /// Describes the state of the thread.
+    /// `stopped` means the thread is dead. `ticking`/`waiting` means that the thread is active,
+    /// and describes it's internal state that is managed by `reset()` and `timerStart()`.
+    const Tag = enum { ticking, waiting, stopped };
+    /// Holds a thread overall state and tracks generation of it's internal changes.
     const State = struct {
-        /// Do not set directly, use `setTag()` instead.
         tag: Tag,
-        /// Do not set directly, use `setTag()` instead.
         gen: u64,
+        failover: bool,
 
-        /// Use for changing tag and gen state.
-        /// no-op on setting the same tag twice.
-        fn setTag(self: *State, t: Tag) void {
+        /// Timer ticking
+        fn ticking(self: *State) void {
+            self.transition(.ticking, null);
+        }
+
+        /// Endpoint changed, failover enabled and timer waiting.
+        fn switched(self: *State) void {
+            self.transition(.waiting, true);
+        }
+
+        /// Initial running state: timer waiting, failover disabled.
+        fn waiting(self: *State) void {
+            self.transition(.waiting, false);
+        }
+
+        /// Stopped state.
+        fn stopped(self: *State) void {
+            self.transition(.stopped, false);
+        }
+
+        /// True writer.
+        /// `null` means don't change failover.
+        /// `gen` bumps only when the tag moves.
+        fn transition(self: *State, t: Tag, fo: ?bool) void {
+            if (fo) |f| self.failover = f;
+            // If the tag is the same, ignore changing generation
             if (self.tag == t) return;
             self.tag = t;
             self.gen +%= 1;
         }
     };
+    /// Holds a generation snapshot and caluclated timer sleep duration from `threadHandler()`.
     const Work = struct { gen: u64, idle_ms: i64 };
+    /// Return values of `waitUntil()`
     const Wake = enum {
         changed,
         expired,
@@ -53,10 +83,8 @@ pub const SwitcherState = struct {
     thread: ?std.Thread = null,
 
     /// Switcher internal saved state
-    state: State = .{ .tag = .stopped, .gen = 0 },
-    /// Failover state if no packets arrived after a switch
-    failover: bool = false,
-    /// Used to pause a switcher thread
+    state: State = .{ .tag = .stopped, .gen = 0, .failover = false },
+    /// Used to pause a switcher thread, persists across stopping or starting a thread
     admin_paused: bool = false,
     /// Required to be set by a caller. Null means "not configured" — `startOrPlay`
     /// refuses to spawn until it is set. Holds how long an endpoint may stay silent
@@ -73,7 +101,7 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return .{
-            .thread_running = if (self.state.tag != .stopped) true else false,
+            .thread_running = self.state.tag != .stopped,
             .admin_paused = self.admin_paused,
             .idle_timeout = self.idle_timeout,
         };
@@ -85,20 +113,19 @@ pub const SwitcherState = struct {
         defer {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            self.state.setTag(.stopped);
+            self.state.stopped();
         }
         while (true) {
             // Blocks while paused; null means exit. One lock, one snapshot.
-            const work = self.threadHandler() orelse break;
-            const gen: u64 = work.gen;
+            const work = self.awaitWork() orelse break;
 
             const deadline: i64 = nowMs(self.io) + work.idle_ms;
 
-            switch (self.waitUntil(deadline, gen)) {
-                .admin_exited => return,
+            switch (self.waitUntil(deadline, work.gen)) {
+                .admin_exited => break, // exit the function
                 .admin_paused => continue, // Park at `threadHandler()`
                 .changed => continue, // Take another snapshot from `threadHandler()`
-                .expired => {},
+                .expired => {}, // proceed to change the endpoint
             }
 
             const now: i64 = nowMs(self.io);
@@ -137,8 +164,8 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        // A live handle and a running flag are set and cleared together.
-        std.debug.assert((self.thread != null) and self.state.tag != .stopped);
+        // A live handle and a thread state are set and cleared together.
+        std.debug.assert((self.thread != null) == (self.state.tag != .stopped));
 
         if (self.state.tag != .stopped and self.thread != null) {
             if (!self.admin_paused) return .already_running;
@@ -149,14 +176,17 @@ pub const SwitcherState = struct {
         }
 
         if (self.idle_timeout == null) return error.NoTimerConfigured;
-        const old_tag = self.state.tag;
+        const was_paused = self.admin_paused;
 
         // Initial running internal state
-        self.state.setTag(.paused);
-        errdefer self.state.setTag(old_tag);
-
+        self.state.waiting();
         // Set admin general pause flag
         self.admin_paused = false;
+
+        errdefer {
+            self.state.stopped();
+            self.admin_paused = was_paused;
+        }
 
         std.log.info("Spawning switcher thread....", .{});
         // Use 'self' as the only argument because the struct has been inited
@@ -171,7 +201,7 @@ pub const SwitcherState = struct {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
 
-            self.state.setTag(.stopped);
+            self.state.stopped();
             self.cond.broadcast(self.io);
             handle = self.thread;
             self.thread = null;
@@ -197,8 +227,8 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.state.tag != .running) return;
-        self.state.setTag(.paused);
+        if (self.state.tag != .ticking) return;
+        self.state.waiting();
     }
 
     /// Start a switcher timer if it's in `paused` state
@@ -207,8 +237,8 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (self.state.tag != .paused) return;
-        self.state.setTag(.running);
+        if (self.state.tag != .waiting) return;
+        self.state.ticking();
     }
 
     /// Join a thread that exited on its own, so a stale handle can never block a
@@ -227,7 +257,7 @@ pub const SwitcherState = struct {
     }
 
     /// Blocks while paused. Returns the current snapshot, or null if thread should exit
-    fn threadHandler(self: *Self) ?Work {
+    fn awaitWork(self: *Self) ?Work {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -235,12 +265,12 @@ pub const SwitcherState = struct {
             // Return if thread is stopped
             if (self.state.tag == .stopped) return null;
             // Unconditionally sleep if admin paused the thread
-            if (!self.admin_paused and self.state.tag == .running) break;
+            if (!self.admin_paused and self.state.tag == .ticking) break;
             self.cond.waitUncancelable(self.io, &self.mutex);
         }
 
         // Set idle duration while holding the lock
-        const idle: i64 = if (self.failover) self.probe_interval else self.idle_timeout.?;
+        const idle: i64 = if (self.state.failover) self.probe_interval else self.idle_timeout.?;
         const idle_ms: i64 = idle * std.time.ms_per_s;
 
         return .{
@@ -269,8 +299,7 @@ pub const SwitcherState = struct {
         if (self.state.tag == .stopped) return .admin_exited;
         if (self.admin_paused) return .admin_paused;
 
-        // Reset failover while still holding the lock
-        self.failover = false;
+        // Generation change occured
         return .changed;
     }
 
@@ -279,8 +308,7 @@ pub const SwitcherState = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        self.failover = true;
-        self.state.setTag(.paused);
+        self.state.switched();
     }
 };
 
