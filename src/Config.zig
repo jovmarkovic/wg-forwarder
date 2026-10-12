@@ -77,6 +77,7 @@ pub fn readFile(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !Reader {
 // Define different config problems as an enum
 pub const Problem = enum {
     zero_timer,
+    short_timer,
     missing_timer,
     id_out_of_range,
     zero_max_sessions,
@@ -96,8 +97,7 @@ pub fn check(cfg: Config) Problems {
 
     if (sw.enabled) {
         if (sw.timer) |t| {
-            if (t == 0) found.insert(.zero_timer);
-            if (t < 12) std.log.warn("Switcher time is < 12s! Make sure to have PersistentKeepalive set.", .{});
+            if (t == 0) found.insert(.zero_timer) else if (t < 12) found.insert(.short_timer);
         } else {
             found.insert(.missing_timer);
         }
@@ -112,7 +112,7 @@ pub fn check(cfg: Config) Problems {
 /// Caller of the check function for usage outside of testing.
 /// Validates if a configuration is in a usable state, logging one line per problem.
 pub fn validate(cfg: Config) error{InvalidConfig}!void {
-    const found = check(cfg);
+    var found = check(cfg);
 
     if (found.contains(.zero_timer))
         std.log.err("config: switcher.timer is 0 seconds", .{});
@@ -126,6 +126,11 @@ pub fn validate(cfg: Config) error{InvalidConfig}!void {
         std.log.err("config: admin_console is enabled but max_sessions is set to 0", .{});
     if (found.contains(.empty_pool_no_console))
         std.log.err("config: switcher endpoints are empty and admin_console is disabled", .{});
+    // Report the warning and let the config pass
+    if (found.contains(.short_timer)) {
+        found.remove(.short_timer);
+        std.log.warn("config: switcher.timer is < 12s, ensure PersistentKeepalive is set", .{});
+    }
 
     if (found.count() != 0) return error.InvalidConfig;
 }
@@ -191,6 +196,13 @@ test "timer: value set to 0" {
         .{ .enabled = true, .id = 0, .timer = 0, .endpoints = two_endpoints },
         admin_on,
     ), &.{.zero_timer});
+}
+
+test "timer: value less than 12" {
+    try expectProblems(testConfig(
+        .{ .enabled = true, .id = 0, .timer = 10, .endpoints = two_endpoints },
+        admin_on,
+    ), &.{.short_timer});
 }
 
 test "timer: missing value when switcher is enabled" {

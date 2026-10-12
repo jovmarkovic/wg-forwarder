@@ -410,7 +410,7 @@ test "startOrPlay invariant holds on a fresh switcher" {
     defer pool.deinit(testing.allocator);
 
     const sw = makeSwitcher(&pool, 30);
-    try testing.expectEqual(sw.thread != null, sw.is_running);
+    try testing.expect((sw.thread != null) == (sw.state.tag != .stopped));
 }
 
 test "probe_interval defaults below the REKEY_ATTEMPT_TIME budget" {
