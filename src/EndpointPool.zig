@@ -1,504 +1,502 @@
 const std = @import("std");
 
-pub const EndpointPool = struct {
-    const Self = @This();
+const EndpointPool = @This();
 
-    // public types
+// public types
 
-    /// Yields live endpoints one at a time, refilling an internal page under the
-    /// read lock. The lock is held per refill, never across the whole iteration, so
-    /// a slow consumer cannot stall the forwarding threads.
-    ///
-    /// Not an atomic snapshot: the pool may change between refills, so an endpoint
-    /// added or removed mid-iteration may or may not be seen. Fine for `list`.
-    ///
-    /// The returned `Entry` is a copy and remains valid after the next call.
-    const Iterator = struct {
-        pub const page_len = 32;
+/// Yields live endpoints one at a time, refilling an internal page under the
+/// read lock. The lock is held per refill, never across the whole iteration, so
+/// a slow consumer cannot stall the forwarding threads.
+///
+/// Not an atomic snapshot: the pool may change between refills, so an endpoint
+/// added or removed mid-iteration may or may not be seen. Fine for `list`.
+///
+/// The returned `Entry` is a copy and remains valid after the next call.
+const Iterator = struct {
+    pub const page_len = 32;
 
-        pool: *Self,
-        buf: [page_len]Entry = undefined,
-        /// Tracks the number of entires in the buffer
-        filled: usize = 0,
-        /// Tracks the number of batches that a caller took
-        consumed: usize = 0,
-        /// Tracks the index of a failed endpoint copy
-        /// and signals the end of the pool
-        cursor: ?u32 = 0,
+    pool: *EndpointPool,
+    buf: [page_len]Entry = undefined,
+    /// Tracks the number of entires in the buffer
+    filled: usize = 0,
+    /// Tracks the number of batches that a caller took
+    consumed: usize = 0,
+    /// Tracks the index of a failed endpoint copy
+    /// and signals the end of the pool
+    cursor: ?u32 = 0,
 
-        /// Next live endpoint, or null when exhausted.
-        pub fn next(it: *Iterator) ?Entry {
-            if (it.consumed == it.filled) {
-                it.refill();
-                if (it.filled == 0) return null;
-            }
-            const entry = it.buf[it.consumed];
-            it.consumed += 1;
-            return entry;
+    /// Next live endpoint, or null when exhausted.
+    pub fn next(it: *Iterator) ?Entry {
+        if (it.consumed == it.filled) {
+            it.refill();
+            if (it.filled == 0) return null;
         }
-
-        /// Refill a buffer from a point where last batch stopped
-        fn refill(it: *Iterator) void {
-            it.filled = 0;
-            it.consumed = 0;
-            const start = it.cursor orelse return; // no lock taken when exhausted
-
-            it.pool.lock.lockSharedUncancelable(it.pool.io);
-            defer it.pool.lock.unlockShared(it.pool.io);
-
-            for (it.pool.slots.items[start..], start..) |slot, index| {
-                if (slot.endpoint) |e| {
-                    // If there is not enough space to copy endpoint
-                    // save the index of it for next iteration
-                    if (it.filled == it.buf.len) {
-                        it.cursor = @intCast(index);
-                        return;
-                    }
-                    it.buf[it.filled] = .{
-                        .index = @intCast(index),
-                        .endpoint = e,
-                    };
-                    it.filled += 1;
-                }
-            }
-            it.cursor = null; // reached the end
-        }
-    };
-
-    /// Required to be set by a caller
-    io: std.Io,
-
-    // fields; Everything below `lock` is guarded by it
-    addr_family: std.Io.net.IpAddress.Family,
-
-    lock: std.Io.RwLock = .init,
-
-    slots: std.ArrayList(Slot) = .empty,
-
-    current: ?std.Io.net.IpAddress = null,
-
-    hint: ?u32 = null,
-
-    free_head: u32 = free_end, // Holds last free slot index or free_end if nothing is free;
-
-    live: usize = 0, // Occupied slot count. `slots.items.len` is the max value
-
-    /// Construct a pool bound to one `Io`. Every method uses this instance,
-    /// so callers never pass one in.
-    pub fn init(io: std.Io, family: std.Io.net.IpAddress.Family) EndpointPool {
-        return .{ .io = io, .addr_family = family };
+        const entry = it.buf[it.consumed];
+        it.consumed += 1;
+        return entry;
     }
 
-    // public API — each takes the lock itself
+    /// Refill a buffer from a point where last batch stopped
+    fn refill(it: *Iterator) void {
+        it.filled = 0;
+        it.consumed = 0;
+        const start = it.cursor orelse return; // no lock taken when exhausted
 
-    /// Compile-time check that a reply buffer is big enough.
-    /// Call it at the buffer's declaration.
-    pub fn checkReplyBuf(comptime len: usize) void {
-        if (len < min_reply_buf) @compileError(std.fmt.comptimePrint(
-            "admin reply buffer is {d} bytes, needs at least {d}",
-            .{ len, min_reply_buf },
-        ));
-    }
+        it.pool.lock.lockSharedUncancelable(it.pool.io);
+        defer it.pool.lock.unlockShared(it.pool.io);
 
-    /// Returns a family if address matches the wanted type or an error
-    pub fn matchFamily(
-        addr: std.Io.net.IpAddress,
-        want: std.Io.net.IpAddress.Family,
-    ) error{WrongFamily}!void {
-        const got: std.Io.net.IpAddress.Family = addr; // tagged union coerces to its tag
-        if (got != want) return error.WrongFamily;
-    }
-
-    /// Returns an address of the current active endpoint if it has it.
-    pub fn currentAddr(self: *Self) ?std.Io.net.IpAddress {
-        self.lock.lockSharedUncancelable(self.io);
-        defer self.lock.unlockShared(self.io);
-        return self.current;
-    }
-
-    /// Return currently active Entry
-    pub fn currentEntry(self: *Self) ?Entry {
-        // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(self.io);
-        defer self.lock.unlockShared(self.io);
-
-        const addr = self.current orelse return null;
-        const i = self.indexOfUnsafe(addr, self.hint) orelse return null;
-        return .{ .index = i, .endpoint = self.slots.items[i].endpoint.? };
-    }
-
-    /// Creates an instance of the Iterator struct
-    pub fn iterate(self: *Self) Iterator {
-        return .{ .pool = self };
-    }
-
-    /// Format one line per found endpoint into a writer starting at slot `start`.
-    /// `find <ip:port>` — O(N), admin-triggered only. Skips free slots.
-    pub fn findByAddr(self: *Self, w: *std.Io.Writer, addr: std.Io.net.IpAddress, start: u32) ?u32 {
-        // Buffer size to be at least of a max_find_line is evaluated during comptime
-        const max_line = max_find_line;
-        // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(self.io);
-        defer self.lock.unlockShared(self.io);
-
-        for (self.slots.items[start..], start..) |slot, index| {
-            if (slot.endpoint) |e|
-                if (std.Io.net.IpAddress.eql(&e.addr, &addr)) {
-                    if (w.unusedCapacityLen() < max_line) return @intCast(index);
-                    w.print(
-                        "Found address: {f} at slot: {d} health: {t}\n",
-                        .{ e.addr, @as(u32, @intCast(index)), e.health },
-                    ) catch return @intCast(index);
-                };
-        }
-        return null;
-    }
-
-    /// Format one line per live endpoint into a writer, starting at slot `start`.
-    /// Returns the slot to resume from, or null at the end of a pool.
-    pub fn writePage(self: *Self, w: *std.Io.Writer, start: u32) ?u32 {
-        // Buffer size to be at least of a max_list_line is evaluated during comptime
-        const max_line = max_list_line;
-        // Using lockSharedUncancelable for reading
-        self.lock.lockSharedUncancelable(self.io);
-        defer self.lock.unlockShared(self.io);
-
-        for (self.slots.items[start..], start..) |slot, index| {
+        for (it.pool.slots.items[start..], start..) |slot, index| {
             if (slot.endpoint) |e| {
-                if (w.unusedCapacityLen() < max_line) return @intCast(index);
-                w.print(
-                    "Address: {f} slot: {d} health: {t}\n",
-                    .{ e.addr, @as(u32, @intCast(index)), e.health },
-                ) catch return @intCast(index);
+                // If there is not enough space to copy endpoint
+                // save the index of it for next iteration
+                if (it.filled == it.buf.len) {
+                    it.cursor = @intCast(index);
+                    return;
+                }
+                it.buf[it.filled] = .{
+                    .index = @intCast(index),
+                    .endpoint = e,
+                };
+                it.filled += 1;
             }
         }
-        return null;
-    }
-
-    /// Used for adding endpoints to the pool,
-    /// Complies with address family selected at start.
-    pub fn add(
-        self: *Self,
-        gpa: std.mem.Allocator,
-        addr: std.Io.net.IpAddress,
-    ) error{ Duplicate, OutOfMemory, WrongFamily }!u32 {
-        // Check if address family matches first
-        try matchFamily(addr, self.addr_family);
-        // Using lockUncancelable for writing
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-        // Checking duplicates after the lock to avoid racing erros
-        if (self.indexOfUnsafe(addr, null) != null) return error.Duplicate;
-        return try self.addUnsafe(gpa, addr);
-    }
-
-    /// Make `address` the active endpoint. Pass an index as a hint for slot location.
-    /// Returns false if points at a freed slot and `current` is left unchanged.
-    pub fn setCurrent(self: *Self, hint: ?u32, addr: std.Io.net.IpAddress) bool {
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        const i = self.indexOfUnsafe(addr, hint) orelse return false;
-        self.current = addr;
-        self.hint = i;
-        return true;
-    }
-
-    /// Edits existing endpoint's addres and
-    /// resets health and last_failed_at state.
-    pub fn edit(
-        self: *Self,
-        hint: ?u32,
-        old: std.Io.net.IpAddress,
-        new: std.Io.net.IpAddress,
-    ) error{ Duplicate, NotFound, WrongFamily }!Endpoint {
-        // Check for address family before the lock
-        try matchFamily(new, self.addr_family);
-
-        // Using lockUncancelable for potenital writing
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        //Check if any address matches
-        const index = self.indexOfUnsafe(old, hint) orelse return error.NotFound;
-
-        if (self.indexOfUnsafe(new, null)) |dup| {
-            // Search for duplicates needs a different index to trigger
-            if (dup != index) return error.Duplicate;
-        }
-        //Capture the endpoint and save old state
-        const ep = self.atUnsafe(index).?; // indexOfUnsafe only returns live slots
-        const old_ep = ep.*;
-        // Set new values
-        ep.addr = new;
-        ep.last_failed_at = 0;
-        ep.health = .untried;
-
-        // Check if old is current one, reassign to new
-        if (sameAddr(self.current, old)) {
-            self.current = new;
-            self.hint = index; // Updating hint is an optional
-        }
-
-        // return old state
-        return old_ep;
-    }
-
-    /// Remove `address` as an endpoint. Pass an index as a hint for slot position.
-    /// Returns null if no address is found after checking the whole pool.
-    pub fn removeByAddr(self: *Self, hint: ?u32, addr: std.Io.net.IpAddress) ?Endpoint {
-        // Using lockUncancelable for writing
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        const index = self.indexOfUnsafe(addr, hint) orelse return null;
-        const was_current = sameAddr(self.current, addr);
-
-        // Remove first then pick a successor. nextCandidateUnsafe sweeps all the
-        // way around the pool. If address is not removed, it can re-select it.
-        // `now` is 0 on purpose: the ranking only compares ages against each other,
-        // so the constant cancels. Pass a real clock if an absolute rule is added
-        // (e.g. "skip anything that failed in the last 30s").
-        const removed = self.removeUnsafe(index) orelse return null;
-
-        if (was_current) {
-            if (self.nextCandidateUnsafe(index, 0)) |i| {
-                self.hint = i;
-                self.current = if (self.atUnsafe(i)) |ep| ep.addr else null;
-            } else {
-                self.current = null; // that was the last one
-            }
-        }
-        return removed;
-    }
-
-    /// Mark the active endpoint healthy.
-    /// No-op if there is none or the handle is stale.
-    pub fn markCurrentGood(self: *Self) void {
-        // Using lockUncancelable for writing
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        const addr = self.current orelse return;
-        const i = self.indexOfUnsafe(addr, self.hint) orelse return;
-        self.hint = i;
-        if (self.atUnsafe(i)) |ep| ep.health = .good;
-    }
-
-    /// Mark the current endpoint failed,
-    /// then advance to the best candidate.
-    pub fn failoverToNext(self: *Self, now: i64) Failover {
-        // Using lockUncancelable for writing
-        self.lock.lockUncancelable(self.io);
-        defer self.lock.unlock(self.io);
-
-        // Check the pool size first
-        if (self.slots.items.len == 0) {
-            self.current = null;
-            return .{ .selected = null, .changed = false };
-        }
-
-        const previous = self.current;
-
-        // Record the failure if the handle still resolves. An admin may have
-        // removed that endpoint since the switcher last looked at it.
-        if (previous) |addr| if (self.indexOfUnsafe(addr, self.hint)) |idx| {
-            // If previous is found, it's safe to change it directly under a lock.
-            if (self.atUnsafe(idx)) |ep| {
-                ep.health = .failed;
-                ep.last_failed_at = now;
-            }
-        };
-
-        // Choose a successor, sweeping onward from where we were so that
-        // equal-ranked endpoints rotate instead of always picking the lowest index.
-        const new_index = self.nextCandidateUnsafe(self.hint, now);
-
-        // Copy the result out, so the caller can log without holding the lock.
-        var selected: ?Entry = null;
-        if (new_index) |idx| {
-            self.hint = idx;
-            // nextCandidateUnsafe cannot find null, this is safe.
-            const ep = self.slots.items[idx].endpoint.?;
-            self.current = ep.addr;
-            selected = .{ .index = idx, .endpoint = ep };
-        } else {
-            self.current = null; // slots exist, but none are live
-        }
-
-        const current: ?std.Io.net.IpAddress = if (selected) |s| s.endpoint.addr else null;
-
-        return .{ .selected = selected, .changed = !sameAddr(previous, current) };
-    }
-
-    pub fn deinit(self: *Self, gpa: std.mem.Allocator) void {
-        self.slots.deinit(gpa);
-    }
-
-    // private types and constants
-
-    /// Endpoint reply state
-    const Health = enum { untried, good, failed };
-
-    /// Contains server address, reply state and time when switcher registered a failed reply
-    const Endpoint = struct {
-        addr: std.Io.net.IpAddress,
-        health: Health = .untried,
-        last_failed_at: i64 = 0,
-    };
-
-    /// Holds index of the slot and endpoint of the current pool snapshot.
-    const Entry = struct { index: u32, endpoint: Endpoint };
-
-    /// Used in a switcher function
-    const Failover = struct {
-        /// The endpoint now selected. null == pool is empty.
-        selected: ?Entry,
-        /// False when we re-selected the same endpoint (nowhere else to go).
-        changed: bool,
-    };
-
-    /// Used by ArrayList for pool allocation
-    const Slot = struct {
-        endpoint: ?Endpoint = null, // null == free
-        next_free: u32 = free_end,
-    };
-
-    // constants
-
-    /// Longest message `showStatus` can emit (two lines).
-    const max_status_line = ("Switcher: RUNNING timer: 9223372036854775807s\nCurrent slot: 4294967295" ++
-        " address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535 health: untried\n").len;
-    /// Longest line `writePage` can emit.
-    const max_list_line = ("Address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
-        " slot: 4294967295 health: untried\n").len;
-    /// Longest line `findByAddr` can emit.
-    const max_find_line = ("Found address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
-        " at slot: 4294967295 health: untried\n").len;
-    /// Longest line `edit` can emit.
-    const max_edit_line = ("Changed [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
-        " to [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535 (was health: untried).\n").len;
-
-    /// Smallest reply buffer in which every fixed-shape reply fits whole.
-    const min_reply_buf = @max(max_status_line, max_list_line, max_find_line, max_edit_line);
-
-    /// Sets the end of empty slot chain
-    const free_end: u32 = std.math.maxInt(u32);
-
-    // private helpers; the caller must already hold the lock
-
-    /// `hint` is an index the operator read from `list` or `find`
-    /// for a slot holding `addr`, or null.
-    /// It is checked first, and the sweep starts from there.
-    /// If not found, search wraps so a near-miss costs a couple of steps instead of N/2.
-    /// A wrong hint is never an error, only a slower lookup: the address is the identity.
-    fn indexOfUnsafe(self: Self, addr: std.Io.net.IpAddress, hint: ?u32) ?u32 {
-        const pool_len: u32 = @intCast(self.slots.items.len);
-        if (pool_len == 0) return null;
-
-        // Safe against out of bounds
-        const start: u32 = if (hint) |h| (if (h < pool_len) h else 0) else 0;
-        if (self.matchUnsafe(start, addr)) return start;
-
-        for (1..pool_len) |k| { // start was already checked
-            const index: u32 = @intCast((start + k) % pool_len);
-            if (self.matchUnsafe(index, addr)) return index;
-        }
-        return null;
-    }
-
-    /// Check if slot index matches the address
-    fn matchUnsafe(self: Self, i: u32, addr: std.Io.net.IpAddress) bool {
-        if (self.slots.items[i].endpoint) |e| return std.Io.net.IpAddress.eql(&e.addr, &addr);
-        return false;
-    }
-
-    /// Helper for comparing optional IP addesses
-    fn sameAddr(a: ?std.Io.net.IpAddress, b: ?std.Io.net.IpAddress) bool {
-        // If a is null, return true if b is null as well.
-        const x = a orelse return b == null;
-        // a is assigned, return false if b is null.
-        const y = b orelse return false;
-
-        return std.Io.net.IpAddress.eql(&x, &y);
-    }
-
-    /// Pick the next candidate, sweeping from just after `from` so equal-ranked
-    /// endpoints are tried round-robin. Only use while locked.
-    fn nextCandidateUnsafe(self: Self, hint: ?u32, now: i64) ?u32 {
-        const pool_len = self.slots.items.len;
-        if (pool_len == 0) return null;
-        // Set the start of looking for candidates
-        const start = if (hint) |id| (id + 1) % pool_len else 0;
-
-        var best: ?u32 = null;
-        var best_rank: u8 = 255;
-        var best_age: i64 = -1;
-
-        for (0..pool_len) |iter| {
-            // Calculate index for the slot based on number of iterations plus the starting point
-            const index = (start + iter) % pool_len;
-            const slot = &self.slots.items[index];
-            const ep = if (slot.endpoint) |*e| e else continue; // skip holes
-
-            const rank: u8 = switch (ep.health) {
-                .good => 0,
-                .untried => 1,
-                .failed => 2,
-            };
-            const age = now - ep.last_failed_at;
-
-            if (rank < best_rank or (rank == best_rank and rank == 2 and age > best_age)) {
-                best_rank = rank;
-                best_age = age;
-                best = @intCast(index);
-            }
-            if (best_rank == 0) break; // nothing beats a known-good one
-
-        }
-
-        return best;
-    }
-
-    /// Backend function for adding an endpoint
-    fn addUnsafe(self: *Self, gpa: std.mem.Allocator, addr: std.Io.net.IpAddress) error{OutOfMemory}!u32 {
-        // Pick last freed slot
-        if (self.free_head != free_end) {
-            const i = self.free_head;
-            const slot = &self.slots.items[i];
-            self.free_head = slot.next_free; // Move freed before to last freed
-            slot.next_free = free_end;
-            slot.endpoint = .{ .addr = addr };
-            self.live += 1;
-            return i;
-        }
-
-        try self.slots.append(gpa, .{ .endpoint = .{ .addr = addr } });
-        self.live += 1;
-        return @intCast(self.slots.items.len - 1);
-    }
-
-    /// Backend function that removes the endpoint
-    /// based upon requested index of the slot.
-    fn removeUnsafe(self: *Self, index: u32) ?Endpoint {
-        if (index >= self.slots.items.len) return null;
-        const slot = &self.slots.items[index];
-        const taken = slot.endpoint orelse return null; // already free
-
-        slot.endpoint = null;
-        slot.next_free = self.free_head;
-        self.free_head = index;
-        self.live -= 1;
-        return taken;
-    }
-
-    /// Backend function that returns an endpoint
-    /// based upon requested index of the slot.
-    fn atUnsafe(self: *Self, index: u32) ?*Endpoint {
-        if (index >= self.slots.items.len) return null;
-        return if (self.slots.items[index].endpoint) |*e| e else null;
+        it.cursor = null; // reached the end
     }
 };
+
+/// Required to be set by a caller
+io: std.Io,
+
+// fields; Everything below `lock` is guarded by it
+addr_family: std.Io.net.IpAddress.Family,
+
+lock: std.Io.RwLock = .init,
+
+slots: std.ArrayList(Slot) = .empty,
+
+current: ?std.Io.net.IpAddress = null,
+
+hint: ?u32 = null,
+
+free_head: u32 = free_end, // Holds last free slot index or free_end if nothing is free;
+
+live: usize = 0, // Occupied slot count. `slots.items.len` is the max value
+
+/// Construct a pool bound to one `Io`. Every method uses this instance,
+/// so callers never pass one in.
+pub fn init(io: std.Io, family: std.Io.net.IpAddress.Family) EndpointPool {
+    return .{ .io = io, .addr_family = family };
+}
+
+// public API — each takes the lock itself
+
+/// Compile-time check that a reply buffer is big enough.
+/// Call it at the buffer's declaration.
+pub fn checkReplyBuf(comptime len: usize) void {
+    if (len < min_reply_buf) @compileError(std.fmt.comptimePrint(
+        "admin reply buffer is {d} bytes, needs at least {d}",
+        .{ len, min_reply_buf },
+    ));
+}
+
+/// Returns a family if address matches the wanted type or an error
+pub fn matchFamily(
+    addr: std.Io.net.IpAddress,
+    want: std.Io.net.IpAddress.Family,
+) error{WrongFamily}!void {
+    const got: std.Io.net.IpAddress.Family = addr; // tagged union coerces to its tag
+    if (got != want) return error.WrongFamily;
+}
+
+/// Returns an address of the current active endpoint if it has it.
+pub fn currentAddr(ep: *EndpointPool) ?std.Io.net.IpAddress {
+    ep.lock.lockSharedUncancelable(ep.io);
+    defer ep.lock.unlockShared(ep.io);
+    return ep.current;
+}
+
+/// Return currently active Entry
+pub fn currentEntry(ep: *EndpointPool) ?Entry {
+    // Using lockSharedUncancelable for reading
+    ep.lock.lockSharedUncancelable(ep.io);
+    defer ep.lock.unlockShared(ep.io);
+
+    const addr = ep.current orelse return null;
+    const i = ep.indexOfUnsafe(addr, ep.hint) orelse return null;
+    return .{ .index = i, .endpoint = ep.slots.items[i].endpoint.? };
+}
+
+/// Creates an instance of the Iterator struct
+pub fn iterate(ep: *EndpointPool) Iterator {
+    return .{ .pool = ep };
+}
+
+/// Format one line per found endpoint into a writer starting at slot `start`.
+/// `find <ip:port>` — O(N), admin-triggered only. Skips free slots.
+pub fn findByAddr(ep: *EndpointPool, w: *std.Io.Writer, addr: std.Io.net.IpAddress, start: u32) ?u32 {
+    // Buffer size to be at least of a max_find_line is evaluated during comptime
+    const max_line = max_find_line;
+    // Using lockSharedUncancelable for reading
+    ep.lock.lockSharedUncancelable(ep.io);
+    defer ep.lock.unlockShared(ep.io);
+
+    for (ep.slots.items[start..], start..) |slot, index| {
+        if (slot.endpoint) |e|
+            if (std.Io.net.IpAddress.eql(&e.addr, &addr)) {
+                if (w.unusedCapacityLen() < max_line) return @intCast(index);
+                w.print(
+                    "Found address: {f} at slot: {d} health: {t}\n",
+                    .{ e.addr, @as(u32, @intCast(index)), e.health },
+                ) catch return @intCast(index);
+            };
+    }
+    return null;
+}
+
+/// Format one line per live endpoint into a writer, starting at slot `start`.
+/// Returns the slot to resume from, or null at the end of a pool.
+pub fn writePage(ep: *EndpointPool, w: *std.Io.Writer, start: u32) ?u32 {
+    // Buffer size to be at least of a max_list_line is evaluated during comptime
+    const max_line = max_list_line;
+    // Using lockSharedUncancelable for reading
+    ep.lock.lockSharedUncancelable(ep.io);
+    defer ep.lock.unlockShared(ep.io);
+
+    for (ep.slots.items[start..], start..) |slot, index| {
+        if (slot.endpoint) |e| {
+            if (w.unusedCapacityLen() < max_line) return @intCast(index);
+            w.print(
+                "Address: {f} slot: {d} health: {t}\n",
+                .{ e.addr, @as(u32, @intCast(index)), e.health },
+            ) catch return @intCast(index);
+        }
+    }
+    return null;
+}
+
+/// Used for adding endpoints to the pool,
+/// Complies with address family selected at start.
+pub fn add(
+    ep: *EndpointPool,
+    gpa: std.mem.Allocator,
+    addr: std.Io.net.IpAddress,
+) error{ Duplicate, OutOfMemory, WrongFamily }!u32 {
+    // Check if address family matches first
+    try matchFamily(addr, ep.addr_family);
+    // Using lockUncancelable for writing
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+    // Checking duplicates after the lock to avoid racing erros
+    if (ep.indexOfUnsafe(addr, null) != null) return error.Duplicate;
+    return try ep.addUnsafe(gpa, addr);
+}
+
+/// Make `address` the active endpoint. Pass an index as a hint for slot location.
+/// Returns false if points at a freed slot and `current` is left unchanged.
+pub fn setCurrent(ep: *EndpointPool, hint: ?u32, addr: std.Io.net.IpAddress) bool {
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+
+    const i = ep.indexOfUnsafe(addr, hint) orelse return false;
+    ep.current = addr;
+    ep.hint = i;
+    return true;
+}
+
+/// Edits existing endpoint's addres and
+/// resets health and last_failed_at state.
+pub fn edit(
+    ep: *EndpointPool,
+    hint: ?u32,
+    old: std.Io.net.IpAddress,
+    new: std.Io.net.IpAddress,
+) error{ Duplicate, NotFound, WrongFamily }!Endpoint {
+    // Check for address family before the lock
+    try matchFamily(new, ep.addr_family);
+
+    // Using lockUncancelable for potenital writing
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+
+    //Check if any address matches
+    const index = ep.indexOfUnsafe(old, hint) orelse return error.NotFound;
+
+    if (ep.indexOfUnsafe(new, null)) |dup| {
+        // Search for duplicates needs a different index to trigger
+        if (dup != index) return error.Duplicate;
+    }
+    //Capture the endpoint and save old state
+    const en = ep.atUnsafe(index).?; // indexOfUnsafe only returns live slots
+    const old_en = en.*;
+    // Set new values
+    en.addr = new;
+    en.last_failed_at = 0;
+    en.health = .untried;
+
+    // Check if old is current one, reassign to new
+    if (sameAddr(ep.current, old)) {
+        ep.current = new;
+        ep.hint = index; // Updating hint is an optional
+    }
+
+    // return old state
+    return old_en;
+}
+
+/// Remove `address` as an endpoint. Pass an index as a hint for slot position.
+/// Returns null if no address is found after checking the whole pool.
+pub fn removeByAddr(ep: *EndpointPool, hint: ?u32, addr: std.Io.net.IpAddress) ?Endpoint {
+    // Using lockUncancelable for writing
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+
+    const index = ep.indexOfUnsafe(addr, hint) orelse return null;
+    const was_current = sameAddr(ep.current, addr);
+
+    // Remove first then pick a successor. nextCandidateUnsafe sweeps all the
+    // way around the pool. If address is not removed, it can re-select it.
+    // `now` is 0 on purpose: the ranking only compares ages against each other,
+    // so the constant cancels. Pass a real clock if an absolute rule is added
+    // (e.g. "skip anything that failed in the last 30s").
+    const removed = ep.removeUnsafe(index) orelse return null;
+
+    if (was_current) {
+        if (ep.nextCandidateUnsafe(index, 0)) |i| {
+            ep.hint = i;
+            ep.current = if (ep.atUnsafe(i)) |en| en.addr else null;
+        } else {
+            ep.current = null; // that was the last one
+        }
+    }
+    return removed;
+}
+
+/// Mark the active endpoint healthy.
+/// No-op if there is none or the handle is stale.
+pub fn markCurrentGood(ep: *EndpointPool) void {
+    // Using lockUncancelable for writing
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+
+    const addr = ep.current orelse return;
+    const i = ep.indexOfUnsafe(addr, ep.hint) orelse return;
+    ep.hint = i;
+    if (ep.atUnsafe(i)) |en| en.health = .good;
+}
+
+/// Mark the current endpoint failed,
+/// then advance to the best candidate.
+pub fn failoverToNext(ep: *EndpointPool, now: i64) Failover {
+    // Using lockUncancelable for writing
+    ep.lock.lockUncancelable(ep.io);
+    defer ep.lock.unlock(ep.io);
+
+    // Check the pool size first
+    if (ep.slots.items.len == 0) {
+        ep.current = null;
+        return .{ .selected = null, .changed = false };
+    }
+
+    const previous = ep.current;
+
+    // Record the failure if the handle still resolves. An admin may have
+    // removed that endpoint since the switcher last looked at it.
+    if (previous) |addr| if (ep.indexOfUnsafe(addr, ep.hint)) |idx| {
+        // If previous is found, it's safe to change it directly under a lock.
+        if (ep.atUnsafe(idx)) |en| {
+            en.health = .failed;
+            en.last_failed_at = now;
+        }
+    };
+
+    // Choose a successor, sweeping onward from where we were so that
+    // equal-ranked endpoints rotate instead of always picking the lowest index.
+    const new_index = ep.nextCandidateUnsafe(ep.hint, now);
+
+    // Copy the result out, so the caller can log without holding the lock.
+    var selected: ?Entry = null;
+    if (new_index) |idx| {
+        ep.hint = idx;
+        // nextCandidateUnsafe cannot find null, this is safe.
+        const en = ep.slots.items[idx].endpoint.?;
+        ep.current = en.addr;
+        selected = .{ .index = idx, .endpoint = en };
+    } else {
+        ep.current = null; // slots exist, but none are live
+    }
+
+    const current: ?std.Io.net.IpAddress = if (selected) |s| s.endpoint.addr else null;
+
+    return .{ .selected = selected, .changed = !sameAddr(previous, current) };
+}
+
+pub fn deinit(ep: *EndpointPool, gpa: std.mem.Allocator) void {
+    ep.slots.deinit(gpa);
+}
+
+// private types and constants
+
+/// Endpoint reply state
+const Health = enum { untried, good, failed };
+
+/// Contains server address, reply state and time when switcher registered a failed reply
+const Endpoint = struct {
+    addr: std.Io.net.IpAddress,
+    health: Health = .untried,
+    last_failed_at: i64 = 0,
+};
+
+/// Holds index of the slot and endpoint of the current pool snapshot.
+const Entry = struct { index: u32, endpoint: Endpoint };
+
+/// Used in a switcher function
+const Failover = struct {
+    /// The endpoint now selected. null == pool is empty.
+    selected: ?Entry,
+    /// False when we re-selected the same endpoint (nowhere else to go).
+    changed: bool,
+};
+
+/// Used by ArrayList for pool allocation
+const Slot = struct {
+    endpoint: ?Endpoint = null, // null == free
+    next_free: u32 = free_end,
+};
+
+// constants
+
+/// Longest message `showStatus` can emit (two lines).
+const max_status_line = ("Switcher: RUNNING timer: 9223372036854775807s\nCurrent slot: 4294967295" ++
+    " address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535 health: untried\n").len;
+/// Longest line `writePage` can emit.
+const max_list_line = ("Address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
+    " slot: 4294967295 health: untried\n").len;
+/// Longest line `findByAddr` can emit.
+const max_find_line = ("Found address: [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
+    " at slot: 4294967295 health: untried\n").len;
+/// Longest line `edit` can emit.
+const max_edit_line = ("Changed [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535" ++
+    " to [ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535 (was health: untried).\n").len;
+
+/// Smallest reply buffer in which every fixed-shape reply fits whole.
+const min_reply_buf = @max(max_status_line, max_list_line, max_find_line, max_edit_line);
+
+/// Sets the end of empty slot chain
+const free_end: u32 = std.math.maxInt(u32);
+
+// private helpers; the caller must already hold the lock
+
+/// `hint` is an index the operator read from `list` or `find`
+/// for a slot holding `addr`, or null.
+/// It is checked first, and the sweep starts from there.
+/// If not found, search wraps so a near-miss costs a couple of steps instead of N/2.
+/// A wrong hint is never an error, only a slower lookup: the address is the identity.
+fn indexOfUnsafe(ep: EndpointPool, addr: std.Io.net.IpAddress, hint: ?u32) ?u32 {
+    const pool_len: u32 = @intCast(ep.slots.items.len);
+    if (pool_len == 0) return null;
+
+    // Safe against out of bounds
+    const start: u32 = if (hint) |h| (if (h < pool_len) h else 0) else 0;
+    if (ep.matchUnsafe(start, addr)) return start;
+
+    for (1..pool_len) |k| { // start was already checked
+        const index: u32 = @intCast((start + k) % pool_len);
+        if (ep.matchUnsafe(index, addr)) return index;
+    }
+    return null;
+}
+
+/// Check if slot index matches the address
+fn matchUnsafe(ep: EndpointPool, i: u32, addr: std.Io.net.IpAddress) bool {
+    if (ep.slots.items[i].endpoint) |e| return std.Io.net.IpAddress.eql(&e.addr, &addr);
+    return false;
+}
+
+/// Helper for comparing optional IP addesses
+fn sameAddr(a: ?std.Io.net.IpAddress, b: ?std.Io.net.IpAddress) bool {
+    // If a is null, return true if b is null as well.
+    const x = a orelse return b == null;
+    // a is assigned, return false if b is null.
+    const y = b orelse return false;
+
+    return std.Io.net.IpAddress.eql(&x, &y);
+}
+
+/// Pick the next candidate, sweeping from just after `from` so equal-ranked
+/// endpoints are tried round-robin. Only use while locked.
+fn nextCandidateUnsafe(ep: EndpointPool, hint: ?u32, now: i64) ?u32 {
+    const pool_len = ep.slots.items.len;
+    if (pool_len == 0) return null;
+    // Set the start of looking for candidates
+    const start = if (hint) |id| (id + 1) % pool_len else 0;
+
+    var best: ?u32 = null;
+    var best_rank: u8 = 255;
+    var best_age: i64 = -1;
+
+    for (0..pool_len) |iter| {
+        // Calculate index for the slot based on number of iterations plus the starting point
+        const index = (start + iter) % pool_len;
+        const slot = &ep.slots.items[index];
+        const en = if (slot.endpoint) |*e| e else continue; // skip holes
+
+        const rank: u8 = switch (en.health) {
+            .good => 0,
+            .untried => 1,
+            .failed => 2,
+        };
+        const age = now - en.last_failed_at;
+
+        if (rank < best_rank or (rank == best_rank and rank == 2 and age > best_age)) {
+            best_rank = rank;
+            best_age = age;
+            best = @intCast(index);
+        }
+        if (best_rank == 0) break; // nothing beats a known-good one
+
+    }
+
+    return best;
+}
+
+/// Backend function for adding an endpoint
+fn addUnsafe(ep: *EndpointPool, gpa: std.mem.Allocator, addr: std.Io.net.IpAddress) error{OutOfMemory}!u32 {
+    // Pick last freed slot
+    if (ep.free_head != free_end) {
+        const i = ep.free_head;
+        const slot = &ep.slots.items[i];
+        ep.free_head = slot.next_free; // Move freed before to last freed
+        slot.next_free = free_end;
+        slot.endpoint = .{ .addr = addr };
+        ep.live += 1;
+        return i;
+    }
+
+    try ep.slots.append(gpa, .{ .endpoint = .{ .addr = addr } });
+    ep.live += 1;
+    return @intCast(ep.slots.items.len - 1);
+}
+
+/// Backend function that removes the endpoint
+/// based upon requested index of the slot.
+fn removeUnsafe(ep: *EndpointPool, index: u32) ?Endpoint {
+    if (index >= ep.slots.items.len) return null;
+    const slot = &ep.slots.items[index];
+    const taken = slot.endpoint orelse return null; // already free
+
+    slot.endpoint = null;
+    slot.next_free = ep.free_head;
+    ep.free_head = index;
+    ep.live -= 1;
+    return taken;
+}
+
+/// Backend function that returns an endpoint
+/// based upon requested index of the slot.
+fn atUnsafe(ep: *EndpointPool, index: u32) ?*Endpoint {
+    if (index >= ep.slots.items.len) return null;
+    return if (ep.slots.items[index].endpoint) |*e| e else null;
+}
 
 // Tests
 
@@ -517,25 +515,25 @@ const TestCtx = struct {
         return .{ .pool = .init(testing.io, family) };
     }
 
-    fn deinit(self: *Self) void {
-        self.pool.deinit(testing.allocator);
+    fn deinit(ep: *Self) void {
+        ep.pool.deinit(testing.allocator);
     }
 
     /// A loopback endpoint distinguished only by port. Returns its slot index.
-    fn add(self: *Self, port: u16) !u32 {
-        return self.pool.add(testing.allocator, addr4(port));
+    fn add(ep: *Self, port: u16) !u32 {
+        return ep.pool.add(testing.allocator, addr4(port));
     }
 
-    fn addV6(self: *Self, port: u16) !u32 {
+    fn addV6(ep: *Self, port: u16) !u32 {
         const a = std.Io.net.IpAddress.parse("::1", port) catch unreachable;
-        return self.pool.add(testing.allocator, a);
+        return ep.pool.add(testing.allocator, a);
     }
 
     /// Reach past the API to set health directly mimicking switcher's inputs.
-    fn setHealth(self: *Self, index: u32, h: EndpointPool.Health, failed_at: i64) void {
-        const ep = self.pool.atUnsafe(index).?;
-        ep.health = h;
-        ep.last_failed_at = failed_at;
+    fn setHealth(ep: *Self, index: u32, h: EndpointPool.Health, failed_at: i64) void {
+        const en = ep.pool.atUnsafe(index).?;
+        en.health = h;
+        en.last_failed_at = failed_at;
     }
 };
 

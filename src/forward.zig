@@ -1,12 +1,12 @@
 const std = @import("std");
-const EndpointPool = @import("endpoints.zig").EndpointPool;
-const SwitcherState = @import("switcher.zig").SwitcherState;
+const Switcher = @import("Switcher.zig");
+const EndpointPool = @import("EndpointPool.zig");
 const nowMs = @import("timestamp.zig").nowMs;
 
 pub fn wgToServer(
     io: std.Io,
     wg_addr: std.Io.net.IpAddress,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     wg_sock: *std.Io.net.Socket,
     serv_sock: *std.Io.net.Socket,
     buf: []u8,
@@ -45,7 +45,7 @@ pub fn wgToServer(
 pub fn serverToWg(
     io: std.Io,
     wg_addr: std.Io.net.IpAddress,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     wg_sock: *std.Io.net.Socket,
     serv_sock: *std.Io.net.Socket,
     srv_buf: []u8,

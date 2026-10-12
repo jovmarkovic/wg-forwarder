@@ -1,9 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const parser = @import("parser.zig");
+const Config = @import("Config.zig");
+const address = @import("address.zig");
+const Switcher = @import("Switcher.zig");
 const timestamp = @import("timestamp.zig");
-const EndpointPool = @import("endpoints.zig").EndpointPool;
-const SwitcherState = @import("switcher.zig").SwitcherState;
+const EndpointPool = @import("EndpointPool.zig");
 
 /// public API
 pub fn adminServer(
@@ -13,7 +14,7 @@ pub fn adminServer(
     ip: []const u8,
     port: u16,
     endpoints: *EndpointPool,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
 ) !void {
     const limit_msg = "Too many sessions.\n";
     const addr = try std.Io.net.IpAddress.parse(ip, port);
@@ -114,7 +115,7 @@ fn session(
     session_count: *std.atomic.Value(u32),
     conn: std.Io.net.Stream,
     endpoints: *EndpointPool,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
 ) void {
     // Close the socket on a session end
     defer {
@@ -162,7 +163,7 @@ fn processInput(
     data: []u8,
     ctx: *Context,
     endpoints: *EndpointPool,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
 ) error{Exit}!void {
     var msg_buf: [2048]u8 = undefined;
     // Comptime-known here (an array's length is part of its type), so a buffer
@@ -230,7 +231,7 @@ fn handleGlobal(
     msg_buf: []u8,
     iter: *std.mem.TokenIterator(u8, .any),
     ctx: *Context,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     endpoints: *EndpointPool,
 ) !void {
     const help_msg =
@@ -280,7 +281,7 @@ fn handleEndpoint(
     conn: std.Io.net.Stream,
     iter: *std.mem.TokenIterator(u8, .any),
     ctx: *Context,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     endpoints: *EndpointPool,
 ) !void {
     const help_msg =
@@ -381,7 +382,7 @@ fn handleSwitcher(
     conn: std.Io.net.Stream,
     iter: *std.mem.TokenIterator(u8, .any),
     ctx: *Context,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     endpoints: *EndpointPool,
 ) !void {
     const help_msg =
@@ -444,7 +445,7 @@ fn showStatus(
     io: std.Io,
     conn: std.Io.net.Stream,
     msg_buf: []u8,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
     endpoints: *EndpointPool,
 ) void {
     const st = switcher.status();
@@ -690,7 +691,7 @@ fn switcherPlay(
     io: std.Io,
     conn: std.Io.net.Stream,
     msg_buf: []u8,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
 ) void {
     const outcome = switcher.startOrPlay() catch |err| {
         const msg: []const u8 = switch (err) {
@@ -719,13 +720,13 @@ fn switcherPlay(
 }
 
 /// Pause
-fn switcherPause(io: std.Io, conn: std.Io.net.Stream, switcher: *SwitcherState) void {
+fn switcherPause(io: std.Io, conn: std.Io.net.Stream, switcher: *Switcher) void {
     switcher.pause();
     reply(io, conn, "Switcher thread paused.\n");
 }
 
 /// Stop
-fn switcherStop(io: std.Io, conn: std.Io.net.Stream, switcher: *SwitcherState) void {
+fn switcherStop(io: std.Io, conn: std.Io.net.Stream, switcher: *Switcher) void {
     switcher.stop();
     reply(io, conn, "Switcher thread terminated.\n");
 }
@@ -736,7 +737,7 @@ fn switcherTime(
     conn: std.Io.net.Stream,
     iter: *std.mem.TokenIterator(u8, .any),
     msg_buf: []u8,
-    switcher: *SwitcherState,
+    switcher: *Switcher,
 ) void {
     const arg = iter.next() orelse {
         reply(io, conn, "Error: Missing seconds.\n");
@@ -830,7 +831,7 @@ fn parseAddrOrReply(
     msg_buf: []u8,
     text: []const u8,
 ) ?std.Io.net.IpAddress {
-    return parser.parseHostPort(text) catch |err| {
+    return address.parseHostPort(text) catch |err| {
         const msg = std.fmt.bufPrint(msg_buf, "Error: {s} {s}", .{
             text, hostPortErrorText(err),
         }) catch HostPortErrorTextCmptime(err);
@@ -841,7 +842,7 @@ fn parseAddrOrReply(
 
 // Error texts
 
-fn hostPortErrorText(err: parser.AddrParseError) []const u8 {
+fn hostPortErrorText(err: address.AddrParseError) []const u8 {
     return switch (err) {
         error.MissingPort => "missing port. (e.g. 1.2.3.4:5000).\n",
         error.BracketsRequired => "IPv6 needs brackets. (e.g. [::1]:5000).\n",
@@ -851,7 +852,7 @@ fn hostPortErrorText(err: parser.AddrParseError) []const u8 {
     };
 }
 
-fn HostPortErrorTextCmptime(err: parser.AddrParseError) []const u8 {
+fn HostPortErrorTextCmptime(err: address.AddrParseError) []const u8 {
     const p = "Error: ";
     return switch (err) {
         error.MissingPort => p ++ "missing port. (e.g. 1.2.3.4:5000).\n",
@@ -999,7 +1000,7 @@ const err_prefix = "Error: ";
 const AddError = error{ Duplicate, WrongFamily, OutOfMemory };
 const EditError = error{ NotFound, Duplicate, WrongFamily };
 
-const addr_errs = [_]parser.AddrParseError{
+const addr_errs = [_]address.AddrParseError{
     error.MissingPort,
     error.BracketsRequired,
     error.UnterminatedBracket,

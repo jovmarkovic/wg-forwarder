@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const parser = @import("parser.zig");
+const Config = @import("Config.zig");
 const server = @import("server.zig");
+const address = @import("address.zig");
+const Switcher = @import("Switcher.zig");
 const timestamp = @import("timestamp.zig");
-const EndpointPool = @import("endpoints.zig").EndpointPool;
-const SwitcherState = @import("switcher.zig").SwitcherState;
+const EndpointPool = @import("EndpointPool.zig");
 const serverToWg = @import("forward.zig").serverToWg;
 const wgToServer = @import("forward.zig").wgToServer;
 
@@ -74,10 +75,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const path = args[2];
-    var reader = try parser.readFile(io, alloc, path);
+    var reader = try Config.readFile(io, alloc, path);
     defer reader.deinit(alloc);
     const config = reader.config();
-    try parser.validate(config);
+    try Config.validate(config);
 
     if (config.log_level) |lvl| if (std.meta.stringToEnum(std.log.Level, lvl)) |level| {
         runtime_level = level;
@@ -94,7 +95,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var bad_addr = false;
     for (config.switcher.endpoints, 0..) |ep, idx| {
-        const addr = parser.parseHostPort(ep) catch |err| {
+        const addr = address.parseHostPort(ep) catch |err| {
             std.log.err("config: switcher.endpoints[{d}] = \"{s}\": {t}", .{ idx, ep, err });
             bad_addr = true;
             continue;
@@ -142,7 +143,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Endpoint -> Forwarder
     const endpoint_listen_addr = try std.Io.net.IpAddress.parse(
-        config.server_socket.address orelse parser.anyAddress(config.address_family),
+        config.server_socket.address orelse address.anyAddress(config.address_family),
         config.server_socket.port,
     );
     try EndpointPool.matchFamily(endpoint_listen_addr, config.address_family);
@@ -154,7 +155,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     });
 
     // Switcher struct owns all shared switcher state
-    var switcher: SwitcherState = .{
+    var switcher: Switcher = .{
         .io = io,
         .idle_timeout = if (config.switcher.timer) |t| t else null,
         .endpoints = &endpoints,
@@ -169,7 +170,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             io,
             alloc,
             config.admin_console.max_sessions,
-            config.admin_console.address orelse parser.loopback(config.address_family),
+            config.admin_console.address orelse address.loopback(config.address_family),
             config.admin_console.port,
             &endpoints,
             &switcher,
