@@ -15,6 +15,7 @@ pub const std_options: std.Options = .{
     .log_level = .debug,
 };
 var runtime_level = std.log.default_level;
+var log_zone: timestamp.Zone = .{};
 
 // Function to set up runtime logging level
 fn logFn(
@@ -36,8 +37,8 @@ fn logFn(
 
     if (builtin.os.tag == .macos) {
         // Added timestamp to output
-        const ts = timestamp.Time.create(io);
-        stderr.writer.print("{f} UTC ", .{ts.fmt(.syslog)}) catch {};
+        const ts: timestamp.Time = .init(io, log_zone);
+        stderr.writer.print("{f} ", .{ts.fmt(.syslog)}) catch {};
     }
     // Same return that std.log.defaultLog() does
     return std.log.defaultLogFileTerminal(level, scope, format, args, stderr) catch {};
@@ -57,14 +58,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
         else => std.heap.smp_allocator,
     };
 
-    const args = try init.args.toSlice(alloc);
-    defer alloc.free(args);
-
     // Sets the max number of active admin threads
     var io_init: std.Io.Threaded = .init(alloc, .{});
     defer io_init.deinit();
 
     const io = io_init.io();
+
+    // Read timezone env first
+    const tz = init.environ.getAlloc(alloc, "TZ") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => null,
+        else => return err,
+    };
+    log_zone = timestamp.Zone.load(alloc, io, tz);
+
+    const args = try init.args.toSlice(alloc);
+    defer alloc.free(args);
 
     if (args.len != 3) {
         std.debug.print("Usage: {s} [-c] <config_path>\n", .{args[0]});
