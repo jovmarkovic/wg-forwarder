@@ -55,7 +55,7 @@ const State = struct {
         sw.gen +%= 1;
     }
 };
-/// Holds a generation snapshot and caluclated timer sleep duration from `threadHandler()`.
+/// Holds a generation snapshot and caluclated timer sleep duration from `awaitWork()`.
 const Work = struct { gen: u64, idle_ms: i64 };
 /// Return values of `waitUntil()`
 const Wake = enum {
@@ -121,8 +121,8 @@ pub fn run(sw: *Switcher) void {
 
         switch (sw.waitUntil(deadline, work.gen)) {
             .admin_exited => break, // exit the function
-            .admin_paused => continue, // Park at `threadHandler()`
-            .changed => continue, // Take another snapshot from `threadHandler()`
+            .admin_paused => continue, // Park at `awaitWork()`
+            .changed => continue, // Take another snapshot from `awaitWork()`
             .expired => {}, // proceed to change the endpoint
         }
 
